@@ -19,6 +19,12 @@ export async function fetchUserInfo(accessToken: string): Promise<AuthUser> {
   }
   const raw = (await res.json()) as Record<string, unknown> & { avatar_url?: unknown };
   const { avatar_url, ...rest } = raw;
+  // Identity is the whole point of userinfo: refuse to fabricate one. Without this, a response
+  // missing `id` would coerce to the literal string "undefined" and silently corrupt every
+  // downstream consumer (cache keys, audit logs, current-user comparisons) across the SSO fleet.
+  if (rest.id === undefined || rest.id === null || rest.id === "") {
+    throw new Error("auth-client-web: userinfo response is missing a user id.");
+  }
   const user: AuthUser = { ...rest, id: String(rest.id) };
   if (typeof avatar_url === "string") user.avatarUrl = avatar_url;
   return user;

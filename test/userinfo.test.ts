@@ -43,6 +43,19 @@ describe("fetchUserInfo()", () => {
     expect(user.avatar_url).toBeUndefined(); // the snake_case alias is not leaked through
   });
 
+  it("throws when the response has no usable id instead of fabricating id='undefined'", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, _init?: RequestInit) =>
+        new Response(JSON.stringify({ email: "a@b.c", name: "NoId" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    await expect(fetchUserInfo("AT")).rejects.toThrow(/id/i);
+  });
+
   it("throws when the userinfo endpoint rejects the token", async () => {
     vi.stubGlobal(
       "fetch",

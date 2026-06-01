@@ -71,6 +71,24 @@ describe("getAccessToken() + refresh coalescing", () => {
     expect(getState().status).toBe("unauthenticated");
   });
 
+  it("does not clear the session on 401 when another tab already rotated the token", async () => {
+    // Two tabs race a refresh. Tab A wins and persists AT2/RT2 to shared storage; our request
+    // (Tab B, with the now-spent RT) comes back 401. We must recover A's token, not log the user out.
+    tokenStore().setSession({ accessToken: "AT", refreshToken: "RT", expiresIn: -100 });
+    const fetchMock = vi.fn(async () => {
+      // simulate the winning tab persisting a rotated pair before our 401 lands
+      tokenStore().setSession({ accessToken: "AT2", refreshToken: "RT2", expiresIn: 900 });
+      return new Response("rotated away", { status: 401 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const token = await getAccessToken();
+
+    expect(token).toBe("AT2"); // recovered the winner's access token
+    expect(tokenStore().getAccessToken()).toBe("AT2"); // session NOT cleared
+    expect(getState().status).not.toBe("unauthenticated");
+  });
+
   it("returns null without a network call when there is no refresh token", async () => {
     const fetchMock = stubRefresh();
     expect(await getAccessToken()).toBeNull();

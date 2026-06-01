@@ -56,6 +56,12 @@ async function doRefresh(): Promise<string | null> {
     body: JSON.stringify({ refresh_token: refreshToken }),
   });
   if (!res.ok) {
+    // Cross-tab rotation guard: refresh tokens rotate, so a sibling tab may have already spent
+    // ours and persisted a fresh pair -- in which case THIS 401 is stale, not a real logout. Only
+    // clear the session if the stored refresh token is still the one we just sent.
+    if (store.getRefreshToken() !== refreshToken) {
+      return store.getAccessToken();
+    }
     store.clear();
     setState({ user: null, status: "unauthenticated" });
     return null;

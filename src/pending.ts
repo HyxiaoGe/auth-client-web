@@ -25,12 +25,23 @@ export function startPendingAuth(verifier: string): string {
   return state;
 }
 
-/** Read and clear the pending auth. Returns null if nothing (or only part) is pending. */
-export function takePendingAuth(): PendingAuth | null {
+/** Read the pending auth WITHOUT consuming it. Returns null if nothing (or only part) is pending. */
+export function peekPendingAuth(): PendingAuth | null {
   const state = sessionStorage.getItem(STATE_KEY);
   const verifier = sessionStorage.getItem(VERIFIER_KEY);
-  sessionStorage.removeItem(STATE_KEY);
-  sessionStorage.removeItem(VERIFIER_KEY);
   if (state === null || verifier === null) return null;
   return { state, verifier };
+}
+
+/** Drop the pending auth. Used to consume it only AFTER the CSRF state has been verified. */
+export function clearPendingAuth(): void {
+  sessionStorage.removeItem(STATE_KEY);
+  sessionStorage.removeItem(VERIFIER_KEY);
+}
+
+/** Read and clear the pending auth. Returns null if nothing (or only part) is pending. */
+export function takePendingAuth(): PendingAuth | null {
+  const pending = peekPendingAuth();
+  clearPendingAuth();
+  return pending;
 }

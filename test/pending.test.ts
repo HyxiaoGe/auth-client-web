@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { startPendingAuth, takePendingAuth } from "../src/pending.js";
+import { clearPendingAuth, peekPendingAuth, startPendingAuth, takePendingAuth } from "../src/pending.js";
 
 describe("pending auth (state + PKCE verifier across the redirect)", () => {
   beforeEach(() => {
@@ -36,5 +36,18 @@ describe("pending auth (state + PKCE verifier across the redirect)", () => {
     const s1 = startPendingAuth("v");
     const s2 = startPendingAuth("v");
     expect(s1).not.toBe(s2);
+  });
+
+  it("peek reads WITHOUT consuming, so the verifier survives for the real exchange", () => {
+    const state = startPendingAuth("keep-me");
+    expect(peekPendingAuth()).toEqual({ state, verifier: "keep-me" });
+    expect(peekPendingAuth()).toEqual({ state, verifier: "keep-me" }); // still there
+    expect(takePendingAuth()).toEqual({ state, verifier: "keep-me" }); // and still consumable
+  });
+
+  it("clear removes the pending material explicitly", () => {
+    startPendingAuth("gone");
+    clearPendingAuth();
+    expect(peekPendingAuth()).toBeNull();
   });
 });

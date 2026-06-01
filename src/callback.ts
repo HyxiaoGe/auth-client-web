@@ -14,7 +14,7 @@
  */
 
 import { getConfig } from "./config.js";
-import { takePendingAuth } from "./pending.js";
+import { clearPendingAuth, peekPendingAuth } from "./pending.js";
 import { tokenStore } from "./session.js";
 import { setState, type AuthUser } from "./store.js";
 import { fetchUserInfo } from "./userinfo.js";
@@ -43,18 +43,18 @@ export async function handleCallback(url: string = window.location.href): Promis
     return { status: "no_callback" };
   }
 
-  // Consume the one-time pending material regardless of outcome (no stale verifier left behind).
-  const pending = takePendingAuth();
-
-  // CSRF gate: pending must exist AND its state must match what came back.
+  // CSRF gate FIRST, and crucially BEFORE consuming the pending material. We only *peek* here so
+  // that an unverifiable callback (forged ?error=...&state=..., a code with a mismatched state, a
+  // replay) cannot burn the victim's in-flight verifier -- which would otherwise let an attacker
+  // who can land the browser on the redirect_uri sabotage the genuine login. auth-service echoes
+  // the real high-entropy state on BOTH success and error, so a mismatch is always illegitimate.
+  const pending = peekPendingAuth();
   if (pending === null || returnedState !== pending.state) {
-    if (error !== null) {
-      // A state-mismatched error redirect is still just "not signed in" -- surface, don't throw.
-      setState({ user: null, status: "unauthenticated" });
-      return { status: "unauthenticated", error };
-    }
-    throw new Error("auth-client-web: state mismatch on callback (possible CSRF or replay).");
+    throw new Error("auth-client-web: state mismatch on callback (possible CSRF, replay, or forgery).");
   }
+
+  // State proven -- now it is safe to consume the one-time material exactly once.
+  clearPendingAuth();
 
   // Provider/IdP reported an error (e.g. login_required from a silent probe).
   if (error !== null) {

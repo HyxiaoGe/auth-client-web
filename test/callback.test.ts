@@ -89,6 +89,31 @@ describe("handleCallback()", () => {
     expect(calls.length).toBe(0);
   });
 
+  it("a forged error callback with a mismatched state does NOT consume pending (login-DoS defense)", async () => {
+    // Victim has a real login in flight. Attacker lands the browser on an error callback whose
+    // state it cannot know (high-entropy, never left the victim). It must not burn the pending
+    // material, or the genuine callback that arrives next would fail.
+    const realState = seedPending("real-verifier");
+    const { calls } = stubFetch();
+
+    await expect(handleCallback("https://app/cb?error=server_error&state=FORGED")).rejects.toThrow(/state/i);
+    expect(calls.length).toBe(0); // nothing exchanged
+    expect(getState().status).toBe("loading"); // store untouched by the forgery
+
+    // the genuine callback now still succeeds because pending survived
+    const result = await handleCallback(`https://app/cb?code=AC-1&state=${realState}`);
+    expect(result).toMatchObject({ status: "authenticated", user: { id: "u-9" } });
+  });
+
+  it("a state mismatch on the success path does NOT consume pending either", async () => {
+    const realState = seedPending("v");
+    stubFetch();
+    await expect(handleCallback("https://app/cb?code=ATTACKER&state=FORGED")).rejects.toThrow(/state/i);
+    // pending preserved -> the real code+state still works
+    const result = await handleCallback(`https://app/cb?code=AC-1&state=${realState}`);
+    expect(result).toMatchObject({ status: "authenticated" });
+  });
+
   it("treats error=login_required as a benign unauthenticated probe result (no throw)", async () => {
     const state = seedPending("v");
     stubFetch();
