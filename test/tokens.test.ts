@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { configure, resetConfig } from "../src/config.js";
-import { getAccessToken, resetTokens } from "../src/tokens.js";
+import { getAccessToken, refresh, resetTokens } from "../src/tokens.js";
 import { tokenStore } from "../src/session.js";
 import { getState, resetStore } from "../src/store.js";
 
@@ -93,5 +93,92 @@ describe("getAccessToken() + refresh coalescing", () => {
     const fetchMock = stubRefresh();
     expect(await getAccessToken()).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+/** A stand-in for the browser LockManager. The real API guarantees cross-TAB mutual exclusion;
+ * a single test process can't span tabs, so we only assert the SDK ROUTES its refresh through
+ * the lock (named per client) and presents the rotating refresh token strictly while the lock
+ * is held -- the property that stops two tabs presenting the same token and tripping
+ * auth-service's refresh-reuse detection (which revokes every token for the user). */
+function fakeLockManager() {
+  const names: string[] = [];
+  let held = false;
+  return {
+    names,
+    isHeld: () => held,
+    manager: {
+      request: async (name: string, cb: () => Promise<unknown>) => {
+        names.push(name);
+        held = true;
+        try {
+          return await cb();
+        } finally {
+          held = false;
+        }
+      },
+    },
+  };
+}
+
+function rotatedResponse(access: string, refreshTok: string) {
+  return new Response(
+    JSON.stringify({ access_token: access, refresh_token: refreshTok, token_type: "bearer", expires_in: 900 }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+describe("refresh(): cross-tab coalescing via Web Locks", () => {
+  beforeEach(() => {
+    resetConfig();
+    resetStore();
+    resetTokens();
+    localStorage.clear();
+    configure({ authUrl: AUTH, clientId: "fusion", redirectUri: "https://app/cb" });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("routes the refresh through a per-client Web Lock when navigator.locks is available", async () => {
+    tokenStore().setSession({ accessToken: "AT", refreshToken: "R1", expiresIn: 900 });
+    const lock = fakeLockManager();
+    vi.stubGlobal("navigator", { locks: lock.manager });
+    vi.stubGlobal("fetch", vi.fn(async () => rotatedResponse("AT2", "R2")));
+
+    const token = await refresh();
+
+    expect(lock.names).toEqual(["auth-client-web:refresh:fusion"]);
+    expect(token).toBe("AT2");
+    expect(tokenStore().getRefreshToken()).toBe("R2"); // rotated inside the lock
+  });
+
+  it("presents the refresh token only while the lock is held (no stale pre-lock network call)", async () => {
+    tokenStore().setSession({ accessToken: "AT", refreshToken: "R1", expiresIn: 900 });
+    const lock = fakeLockManager();
+    vi.stubGlobal("navigator", { locks: lock.manager });
+    const heldWhenFetched: boolean[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        heldWhenFetched.push(lock.isHeld());
+        return rotatedResponse("AT2", "R2");
+      }),
+    );
+
+    await refresh();
+
+    expect(heldWhenFetched).toEqual([true]); // the POST /auth/token/refresh fired inside the lock
+  });
+
+  it("falls back to a direct refresh when navigator.locks is unavailable (SSR / old browsers)", async () => {
+    tokenStore().setSession({ accessToken: "AT", refreshToken: "R1", expiresIn: 900 });
+    vi.stubGlobal("navigator", {}); // no .locks
+    vi.stubGlobal("fetch", vi.fn(async () => rotatedResponse("AT2", "R2")));
+
+    const token = await refresh();
+
+    expect(token).toBe("AT2");
+    expect(tokenStore().getRefreshToken()).toBe("R2");
   });
 });

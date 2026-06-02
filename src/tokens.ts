@@ -7,8 +7,12 @@
  * so a page that fires N requests on load performs exactly one /token/refresh -- important
  * because refresh tokens rotate, and a refresh storm would otherwise invalidate itself.
  *
- * (Cross-tab coalescing via the Web Locks API is a deliberate follow-up; this covers the
- * dominant single-tab case. Cross-tab races degrade gracefully to a 401 + re-auth.)
+ * Cross-tab coalescing is layered on top via the Web Locks API (see `withRefreshLock`): the
+ * in-tab `inFlight` promise collapses N callers in ONE tab to a single request; the lock then
+ * serializes that request across tabs so two tabs never present the same rotating refresh token
+ * at once. Without it, a sibling tab spending the token first makes auth-service treat ours as a
+ * reuse attack and revoke EVERY token for the user. Degrades to a direct call where Web Locks
+ * are unavailable (SSR, old browsers, tests), preserving the prior single-tab behavior.
  */
 
 import { getConfig } from "./config.js";
@@ -32,13 +36,30 @@ export async function getAccessToken(): Promise<string | null> {
   return refresh();
 }
 
-/** Force a refresh, coalescing concurrent callers onto a single network request. */
+/** Force a refresh, coalescing concurrent callers onto a single network request (in-tab), then
+ * serializing that request across tabs via a Web Lock so siblings can't replay a spent token. */
 export function refresh(): Promise<string | null> {
   if (inFlight) return inFlight;
-  inFlight = doRefresh().finally(() => {
+  inFlight = withRefreshLock(doRefresh).finally(() => {
     inFlight = null;
   });
   return inFlight;
+}
+
+/** Run the refresh under a per-client Web Lock so only one tab refreshes at a time. Refresh
+ * tokens rotate (one-time use); a waiting tab re-reads the already-rotated token inside the
+ * lock (doRefresh reads it there) instead of replaying the spent one and tripping auth-service's
+ * reuse detection, which revokes EVERY token for the user. No Web Locks API (SSR / old browsers
+ * / tests) -> direct call, i.e. the prior single-tab behavior. */
+async function withRefreshLock(run: () => Promise<string | null>): Promise<string | null> {
+  const locks = globalThis.navigator?.locks;
+  if (!locks?.request) return run();
+  const { clientId } = getConfig();
+  let result: string | null = null;
+  await locks.request(`auth-client-web:refresh:${clientId}`, async () => {
+    result = await run();
+  });
+  return result;
 }
 
 async function doRefresh(): Promise<string | null> {
