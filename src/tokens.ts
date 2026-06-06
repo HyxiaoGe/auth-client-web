@@ -78,14 +78,23 @@ async function doRefresh(): Promise<string | null> {
   });
   if (!res.ok) {
     // Cross-tab rotation guard: refresh tokens rotate, so a sibling tab may have already spent
-    // ours and persisted a fresh pair -- in which case THIS 401 is stale, not a real logout. Only
-    // clear the session if the stored refresh token is still the one we just sent.
+    // ours and persisted a fresh pair -- in which case THIS failure is stale, not a real logout.
+    // Only act on it if the stored refresh token is still the one we just sent.
     if (store.getRefreshToken() !== refreshToken) {
       return store.getAccessToken();
     }
-    store.clear();
-    setState({ user: null, status: "unauthenticated" });
-    return null;
+    // Definitive rejection (401/403): the refresh token is actually invalid -> log out.
+    if (res.status === 401 || res.status === 403) {
+      store.clear();
+      setState({ user: null, status: "unauthenticated" });
+      return null;
+    }
+    // Transient failure (5xx, 429, gateway/error page from a flaky tunnel): the rotation may well
+    // have succeeded server-side with its response lost in transit. Clearing the session here would
+    // turn a dropped/sluggish response into a spurious logout. Keep the token and throw so the
+    // caller treats it as transient -- the unchanged token gets retried and auth-service's
+    // rotation-grace window re-issues the successor.
+    throw new Error(`Token refresh failed: ${res.status}`);
   }
   const tokens = (await res.json()) as TokenResponse;
   store.setSession({

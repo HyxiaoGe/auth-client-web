@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { configure, resetConfig } from "../src/config.js";
 import { getAccessToken, refresh, resetTokens } from "../src/tokens.js";
 import { tokenStore } from "../src/session.js";
-import { getState, resetStore } from "../src/store.js";
+import { getState, resetStore, setState } from "../src/store.js";
 
 const AUTH = "https://auth.example";
 
@@ -180,5 +180,53 @@ describe("refresh(): cross-tab coalescing via Web Locks", () => {
 
     expect(token).toBe("AT2");
     expect(tokenStore().getRefreshToken()).toBe("R2");
+  });
+});
+
+/** A rotation RESPONSE lost over a flaky tunnel surfaces to the client as a 5xx / 429 / error page,
+ * NOT a clean 401. Treating those transient failures as a logout is the passive-logout bug: a
+ * dropped response must never clear the session. Only a definitive 401/403 (refresh token actually
+ * rejected) logs out; anything else is kept and rethrown so the caller retries (and auth-service's
+ * rotation-grace window re-issues the successor). */
+describe("refresh(): transient (5xx/429) vs definitive (401/403) failure", () => {
+  beforeEach(() => {
+    resetConfig();
+    resetStore();
+    resetTokens();
+    localStorage.clear();
+    configure({ authUrl: AUTH, clientId: "audio", redirectUri: "https://app/cb" });
+    tokenStore().setSession({ accessToken: "AT", refreshToken: "RT", expiresIn: -100 }); // expired
+    setState({ user: { id: "u1" }, status: "authenticated" });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("logs out on a 401 (refresh token truly rejected)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("no", { status: 401 })));
+    expect(await refresh()).toBeNull();
+    expect(getState().status).toBe("unauthenticated");
+    expect(tokenStore().getRefreshToken()).toBeNull();
+  });
+
+  it("logs out on a 403", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("no", { status: 403 })));
+    expect(await refresh()).toBeNull();
+    expect(getState().status).toBe("unauthenticated");
+    expect(tokenStore().getRefreshToken()).toBeNull();
+  });
+
+  it("does NOT log out on a 5xx -- keeps the token and throws (transient)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 502 })));
+    await expect(refresh()).rejects.toThrow();
+    expect(getState().status).toBe("authenticated"); // session preserved
+    expect(tokenStore().getRefreshToken()).toBe("RT"); // token kept for the next retry
+  });
+
+  it("does NOT log out on a 429 -- transient", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("slow down", { status: 429 })));
+    await expect(refresh()).rejects.toThrow();
+    expect(getState().status).toBe("authenticated");
+    expect(tokenStore().getRefreshToken()).toBe("RT");
   });
 });

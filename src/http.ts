@@ -16,14 +16,27 @@ function withAuth(init: RequestInit, token: string | null): RequestInit {
 }
 
 export async function fetchWithAuth(input: string | URL, init: RequestInit = {}): Promise<Response> {
-  const token = await getAccessToken();
+  // A transient refresh failure (5xx / flaky tunnel) throws rather than logging out; treat it as
+  // "no fresh token" so one bad refresh degrades to a single failed request, never an exception
+  // bubbling out of fetchWithAuth.
+  let token: string | null;
+  try {
+    token = await getAccessToken();
+  } catch {
+    token = null;
+  }
   const res = await fetch(input as string, withAuth(init, token));
   if (res.status !== 401) {
     return res;
   }
 
   // Token was rejected server-side -- force one refresh and retry once.
-  const fresh = await refresh();
+  let fresh: string | null;
+  try {
+    fresh = await refresh();
+  } catch {
+    return res; // transient refresh failure -> return the original 401, don't loop or throw
+  }
   if (fresh === null) {
     return res;
   }

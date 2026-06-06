@@ -74,6 +74,21 @@ describe("fetchWithAuth()", () => {
     expect(resourceCalls).toBe(1); // tried once, refresh failed, no second resource hit
   });
 
+  it("returns the original 401 (no throw) when the retry refresh fails transiently (5xx)", async () => {
+    tokenStore().setSession({ accessToken: "AT", refreshToken: "RT", expiresIn: 3600 });
+    let resourceCalls = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === `${AUTH}/auth/token/refresh`) return new Response("boom", { status: 502 });
+      resourceCalls++;
+      return new Response("x", { status: 401 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await fetchWithAuth(API); // a 502 refresh throws internally; must be swallowed
+    expect(res.status).toBe(401);
+    expect(resourceCalls).toBe(1); // tried once, transient refresh failed, no second resource hit
+  });
+
   it("preserves the caller's method and body", async () => {
     tokenStore().setSession({ accessToken: "AT", refreshToken: "RT", expiresIn: 3600 });
     let captured: RequestInit | undefined;
