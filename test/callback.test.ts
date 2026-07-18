@@ -128,4 +128,74 @@ describe("handleCallback()", () => {
     expect(result).toEqual({ status: "no_callback" });
     expect(getState().status).toBe("loading"); // untouched
   });
+
+  it("共享换码内核后仍保留 legacy redirectPath 的成功后单次读取语义", async () => {
+    sessionStorage.setItem("acw_redirect_path", "/legacy-target");
+    const state = seedPending("legacy-verifier");
+    stubFetch();
+
+    const result = await handleCallback(`https://app/cb?code=AC-1&state=${state}`);
+
+    expect(result).toMatchObject({ status: "authenticated", redirectPath: "/legacy-target" });
+    expect(sessionStorage.getItem("acw_redirect_path")).toBeNull();
+  });
+
+  it("legacy token exchange 失败时不提前消费 redirectPath", async () => {
+    sessionStorage.setItem("acw_redirect_path", "/keep-on-failure");
+    const state = seedPending("legacy-verifier");
+    stubFetch({ tokenStatus: 502 });
+
+    await expect(handleCallback(`https://app/cb?code=AC-1&state=${state}`)).rejects.toThrow(/token exchange/i);
+
+    expect(sessionStorage.getItem("acw_redirect_path")).toBe("/keep-on-failure");
+  });
+
+  it("legacy callback 在网络等待期间 configure 切换后仍使用最初配置快照", async () => {
+    configure({
+      authUrl: "https://auth-a.example",
+      clientId: "client-a",
+      redirectUri: "https://app-a.example/callback",
+      storageKeys: { accessToken: "a-at", refreshToken: "a-rt", expiresAt: "a-exp", user: "a-user" },
+    });
+    const state = seedPending("legacy-verifier");
+    let releaseToken!: () => void;
+    const tokenGate = new Promise<void>((resolve) => {
+      releaseToken = resolve;
+    });
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        urls.push(url);
+        if (url.endsWith("/auth/oauth/token")) {
+          await tokenGate;
+          return new Response(
+            JSON.stringify({ access_token: "AT-a", refresh_token: "RT-a", token_type: "bearer", expires_in: 900 }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ id: "u-a" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+
+    const completion = handleCallback(`https://app-a.example/callback?code=AC-a&state=${state}`);
+    configure({
+      authUrl: "https://auth-b.example",
+      clientId: "client-b",
+      redirectUri: "https://app-b.example/callback",
+      storageKeys: { accessToken: "b-at", refreshToken: "b-rt", expiresAt: "b-exp", user: "b-user" },
+    });
+    releaseToken();
+
+    await expect(completion).resolves.toMatchObject({ status: "authenticated", user: { id: "u-a" } });
+    expect(urls).toEqual([
+      "https://auth-a.example/auth/oauth/token",
+      "https://auth-a.example/auth/userinfo",
+    ]);
+    expect(localStorage.getItem("a-at")).toBe("AT-a");
+    expect(localStorage.getItem("b-at")).toBeNull();
+  });
 });

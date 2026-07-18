@@ -50,6 +50,20 @@ export function getConfig(): ResolvedConfig {
   return current;
 }
 
+/**
+ * 为跨网络等待的认证事务捕获独立配置快照，避免 configure() 或外部对象修改导致
+ * 同一事务跨 auth issuer、client 或 storage keys 写入。
+ */
+export function getConfigSnapshot(): ResolvedConfig {
+  const config = getConfig();
+  return Object.freeze({
+    authUrl: config.authUrl,
+    clientId: config.clientId,
+    redirectUri: config.redirectUri,
+    storageKeys: Object.freeze({ ...config.storageKeys }),
+  });
+}
+
 /** Test hook: clear module state between cases. */
 export function resetConfig(): void {
   current = null;

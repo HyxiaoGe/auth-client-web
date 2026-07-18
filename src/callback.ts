@@ -13,24 +13,16 @@
  * cold IdP session; it is reported as a benign unauthenticated result, not thrown.
  */
 
-import { getConfig } from "./config.js";
+import { completeAuthorizationCode, type AuthenticatedResult } from "./authorization-code.js";
 import { clearPendingAuth, peekPendingAuth } from "./pending.js";
-import { tokenStore } from "./session.js";
-import { setState, type AuthUser } from "./store.js";
-import { fetchUserInfo } from "./userinfo.js";
+import { setState } from "./store.js";
 import { takeRedirectPath } from "./authorize.js";
+import { getConfigSnapshot } from "./config.js";
 
 export type CallbackResult =
-  | { status: "authenticated"; user: AuthUser; redirectPath: string }
+  | AuthenticatedResult
   | { status: "unauthenticated"; error: string }
   | { status: "no_callback" };
-
-type TokenResponse = {
-  access_token: string;
-  refresh_token: string;
-  token_type: string;
-  expires_in: number;
-};
 
 export async function handleCallback(url: string = window.location.href): Promise<CallbackResult> {
   const params = new URL(url).searchParams;
@@ -62,26 +54,12 @@ export async function handleCallback(url: string = window.location.href): Promis
     return { status: "unauthenticated", error };
   }
 
-  const { authUrl, clientId } = getConfig();
-  const res = await fetch(`${authUrl}/auth/oauth/token`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, client_id: clientId, code_verifier: pending.verifier }),
-  });
-  if (!res.ok) {
-    throw new Error(`auth-client-web: token exchange failed (${res.status}).`);
+  // 上面的 no-callback 分支已在运行时证明该不变量；这里显式声明，帮助 TypeScript
+  // 在独立的 error 分支收窄之后确认 code 类型。
+  if (code === null) {
+    throw new Error("auth-client-web: callback is missing an authorization code.");
   }
-  const tokens = (await res.json()) as TokenResponse;
-  const store = tokenStore();
-  store.setSession({
-    accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token,
-    expiresIn: tokens.expires_in,
-  });
-
-  const user = await fetchUserInfo(tokens.access_token);
-  store.setUser(user);
-  setState({ user, status: "authenticated" });
-
+  const config = getConfigSnapshot();
+  const user = await completeAuthorizationCode(code, pending.verifier, config);
   return { status: "authenticated", user, redirectPath: takeRedirectPath() };
 }

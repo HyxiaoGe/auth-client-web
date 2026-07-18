@@ -24,6 +24,15 @@ export type { AuthorizeOptions } from "./authorize.js";
 export { handleCallback } from "./callback.js";
 export type { CallbackResult } from "./callback.js";
 
+// Headless 授权事务（与投递通道和 UI 无关）
+export { prepareAuthorization, completeAuthorization, cancelAuthorization } from "./authorization.js";
+export type {
+  PrepareAuthorizationOptions,
+  PreparedAuthorization,
+  CompleteAuthorizationOptions,
+  AuthenticatedResult,
+} from "./authorization.js";
+
 // Tokens + authenticated requests
 export { getAccessToken, refresh } from "./tokens.js";
 export { fetchWithAuth } from "./http.js";

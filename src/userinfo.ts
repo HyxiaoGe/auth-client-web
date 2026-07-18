@@ -5,14 +5,23 @@
  * fields without the SDK having to know about them.
  */
 
-import { getConfig } from "./config.js";
+import { getConfigSnapshot, type ResolvedConfig } from "./config.js";
 import type { AuthUser } from "./store.js";
 
 export async function fetchUserInfo(accessToken: string): Promise<AuthUser> {
-  const { authUrl } = getConfig();
-  const res = await fetch(`${authUrl}/auth/userinfo`, {
+  return fetchUserInfoForConfig(accessToken, getConfigSnapshot());
+}
+
+/** 使用调用方在首次网络等待前捕获的配置读取用户，供完整授权事务内部复用。 */
+export async function fetchUserInfoForConfig(
+  accessToken: string,
+  config: ResolvedConfig,
+  signal?: AbortSignal,
+): Promise<AuthUser> {
+  const res = await fetch(`${config.authUrl}/auth/userinfo`, {
     method: "GET",
     headers: { Authorization: `Bearer ${accessToken}` },
+    signal,
   });
   if (!res.ok) {
     throw new Error(`auth-client-web: userinfo failed (${res.status})`);
