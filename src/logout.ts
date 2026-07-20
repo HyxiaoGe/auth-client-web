@@ -14,9 +14,10 @@
  *    be a registered redirect_uri (defaults to this app's `redirectUri`, already registered).
  */
 
-import { getConfig } from "./config.js";
+import { getConfigSnapshot } from "./config.js";
 import * as navigation from "./navigation.js";
-import { tokenStore } from "./session.js";
+import { withSessionMutationLock } from "./session-mutation.js";
+import { createTokenStore } from "./storage.js";
 import { setState } from "./store.js";
 
 export type LogoutOptions = {
@@ -30,41 +31,43 @@ export type LogoutOptions = {
 };
 
 export async function logout(options: LogoutOptions = {}): Promise<void> {
-  const store = tokenStore();
-  // 必须在本地 clear 前捕获。JWT payload 在这里不作为授权依据，只把 auth-service
-  // 已签发票据中的 sid 原样声明给服务端，由服务端与当前 HttpOnly Cookie 再比较。
-  const sessionSid = extractSessionSid(store.getAccessToken());
-  const refreshToken = store.getRefreshToken();
+  const config = getConfigSnapshot();
+  let sessionSid: string | null = null;
+  await withSessionMutationLock(config, async () => {
+    const store = createTokenStore(config.storageKeys);
+    // 必须在本地 clear 前捕获。JWT payload 在这里不作为授权依据，只把 auth-service
+    // 已签发票据中的 sid 原样声明给服务端，由服务端与当前 HttpOnly Cookie 再比较。
+    sessionSid = extractSessionSid(store.getAccessToken());
+    const refreshToken = store.getRefreshToken();
 
-  if (refreshToken !== null) {
-    const { authUrl } = getConfig();
-    try {
-      await fetch(`${authUrl}/auth/token/revoke`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      });
-    } catch {
-      // best-effort: a failed revoke must not block the local clear below
+    if (refreshToken !== null) {
+      try {
+        await fetch(`${config.authUrl}/auth/token/revoke`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+      } catch {
+        // best-effort: a failed revoke must not block the local clear below
+      }
     }
-  }
 
-  store.clear();
-  setState({ user: null, status: "unauthenticated" });
+    store.clear();
+    setState({ user: null, status: "unauthenticated" });
+  });
 
   if (options.global) {
     // Single Logout: top-level POST-form so the SameSite=Lax cookie reaches POST-only
     // /auth/logout, which destroys the IdP session and 302s back to a registered uri.
-    const { authUrl, clientId, redirectUri } = getConfig();
     const fields: Record<string, string> = {
-      post_logout_redirect_uri: options.postLogoutRedirectUri ?? redirectUri,
-      client_id: clientId,
+      post_logout_redirect_uri: options.postLogoutRedirectUri ?? config.redirectUri,
+      client_id: config.clientId,
     };
     // 存量 access token 没有 sid 时省略字段，保持 SDK 请求形状兼容；是否接受
     // legacy 全局登出由 auth-service 的 fail-closed 迁移策略决定。
     if (sessionSid !== null) fields.session_sid = sessionSid;
     navigation.submitForm(
-      `${authUrl}${sessionSid === null ? "/auth/logout" : "/auth/logout/session"}`,
+      `${config.authUrl}${sessionSid === null ? "/auth/logout" : "/auth/logout/session"}`,
       fields,
     );
     return;

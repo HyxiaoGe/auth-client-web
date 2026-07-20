@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { configure, resetConfig } from "../src/config.js";
 import { tokenStore } from "../src/session.js";
-import { getState, resetStore, setState } from "../src/store.js";
+import { getState, resetStore, setState, subscribe } from "../src/store.js";
 
 const EVENT_KEY = "acw_session_sync:fusion";
 
@@ -44,6 +44,8 @@ describe("同源多标签会话切换通知", () => {
   it("收到 switched commit 事件后只从已完整提交的本地会话重建认证状态", () => {
     setState({ user: { id: "u-old" }, status: "synchronizing" });
     const newUser = { id: "u-new", email: "new@example.com" };
+    const observedStatuses: string[] = [];
+    const unsubscribe = subscribe((state) => observedStatuses.push(state.status));
     tokenStore().setAuthenticatedSession(
       { accessToken: "AT-new", refreshToken: "RT-new", expiresIn: 900 },
       newUser,
@@ -57,6 +59,8 @@ describe("同源多标签会话切换通知", () => {
       }),
     );
 
+    unsubscribe();
+    expect(observedStatuses).toEqual(["synchronizing", "authenticated"]);
     expect(getState()).toEqual({ user: newUser, status: "authenticated" });
   });
 

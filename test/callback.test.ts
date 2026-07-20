@@ -71,6 +71,9 @@ describe("handleCallback()", () => {
     expect(tokenStore().getRefreshToken()).toBe("RT");
     expect(result).toMatchObject({ status: "authenticated", user: { id: "u-9", avatarUrl: "https://i/z.png" } });
     expect(getState()).toMatchObject({ status: "authenticated", user: { id: "u-9" } });
+    expect(JSON.parse(localStorage.getItem("acw_session_sync:audio") ?? "null")).toMatchObject({
+      type: "switched",
+    });
 
     // pending one-time material was consumed
     expect(takePendingAuth()).toBeNull();

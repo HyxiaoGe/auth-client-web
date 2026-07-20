@@ -68,11 +68,30 @@ function applyEvent(event: SessionSyncEvent, config: ResolvedConfig): void {
   }
 
   // 即使浏览器漏掉了 switching 事件，switched 也必须先终止旧账号在途请求，
-  // 再从原子会话记录采用新身份。
+  // 并同步发布 synchronizing，让宿主先清理旧身份运行态，再从原子会话记录采用新身份。
+  // 两次 setState 都同步通知；宿主可以把异步清理 promise 串到随后的 authenticated 采用上。
+  synchronizeFromStoredSession(config);
+}
+
+/**
+ * 从已经原子提交的共享会话同步当前标签。
+ *
+ * 除跨标签事件外，token 出口也会在发现“内存仍是 A、持久层已是 B”时同步调用它。
+ * 这样即使 switched 事件仍在任务队列中，请求屏障也会先于任何 B token 暴露而建立。
+ */
+export function synchronizeFromStoredSession(config: ResolvedConfig): void {
   beginAuthSessionTransition();
+  setState({ status: "synchronizing" });
   const store = createTokenStore(config.storageKeys);
-  const user = store.getUser<AuthUser>();
-  if (store.getAccessToken() === null || user === null || typeof user.id !== "string" || user.id.length === 0) {
+  const snapshot = store.getSessionSnapshot();
+  const user = snapshot?.user as AuthUser | null | undefined;
+  if (
+    snapshot === null ||
+    user === null ||
+    user === undefined ||
+    typeof user.id !== "string" ||
+    user.id.length === 0
+  ) {
     return;
   }
   setState({ user, status: "authenticated" });
