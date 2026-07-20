@@ -5,6 +5,7 @@
  */
 
 import { AuthClientError } from "./errors.js";
+import { configureSessionSync, disposeSessionSync } from "./session-sync.js";
 
 export type StorageKeys = {
   accessToken: string;
@@ -43,6 +44,7 @@ export function configure(config: AuthConfig): void {
     redirectUri: config.redirectUri,
     storageKeys: { ...DEFAULT_KEYS, ...config.storageKeys },
   };
+  configureSessionSync(current);
 }
 
 export function getConfig(): ResolvedConfig {
@@ -71,5 +73,6 @@ export function getConfigSnapshot(): ResolvedConfig {
 
 /** Test hook: clear module state between cases. */
 export function resetConfig(): void {
+  disposeSessionSync();
   current = null;
 }

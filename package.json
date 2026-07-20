@@ -1,7 +1,7 @@
 {
   "name": "auth-client-web",
-  "version": "0.2.1",
-  "description": "Framework-neutral browser SDK for auth-service: silent SSO via /authorize (PKCE + state), token lifecycle, fetchWithAuth.",
+  "version": "0.3.0",
+  "description": "Framework-neutral browser SDK for auth-service: PKCE SSO, secure session reconciliation, token lifecycle, fetchWithAuth.",
   "keywords": [
     "authentication",
     "oauth2",

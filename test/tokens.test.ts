@@ -39,6 +39,24 @@ describe("getAccessToken() + refresh coalescing", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("账户切换屏障生效后不返回或刷新旧票据", async () => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 });
+    setState({ user: { id: "u-old" }, status: "synchronizing" });
+    const fetchMock = stubRefresh();
+
+    await expect(getAccessToken()).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "session_reconcile_blocked",
+      blocking: true,
+    } satisfies Partial<AuthClientError>);
+    await expect(refresh()).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "session_reconcile_blocked",
+      blocking: true,
+    } satisfies Partial<AuthClientError>);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("refreshes an expired token and persists the rotated pair", async () => {
     tokenStore().setSession({ accessToken: "AT", refreshToken: "RT", expiresIn: -100 }); // already expired
     const fetchMock = stubRefresh();
@@ -170,6 +188,65 @@ describe("refresh(): cross-tab coalescing via Web Locks", () => {
     await refresh();
 
     expect(heldWhenFetched).toEqual([true]); // the POST /auth/token/refresh fired inside the lock
+  });
+
+  it("refresh 等待期间账户切换屏障生效时丢弃旧 sid 的成功响应", async () => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "R-old", expiresIn: 900 });
+    setState({ user: { id: "u-old" }, status: "authenticated" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        setState({ status: "synchronizing" });
+        return rotatedResponse("AT-old-rotated", "R-old-rotated");
+      }),
+    );
+
+    await expect(refresh()).rejects.toMatchObject({
+      code: "session_reconcile_blocked",
+      blocking: true,
+    } satisfies Partial<AuthClientError>);
+    expect(tokenStore().getAccessToken()).toBe("AT-old");
+    expect(tokenStore().getRefreshToken()).toBe("R-old");
+  });
+
+  it("旧 refresh 成功响应晚于兄弟标签的新会话提交时采用胜者，不覆盖新账户", async () => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "R-old", expiresIn: 900 });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        tokenStore().setAuthenticatedSession(
+          { accessToken: "AT-new-user", refreshToken: "R-new-user", expiresIn: 900 },
+          { id: "u-new" },
+        );
+        setState({ user: { id: "u-new" }, status: "authenticated" });
+        return rotatedResponse("AT-stale-old-user", "R-stale-old-user");
+      }),
+    );
+
+    await expect(refresh()).resolves.toBe("AT-new-user");
+    expect(tokenStore().getAccessToken()).toBe("AT-new-user");
+    expect(tokenStore().getRefreshToken()).toBe("R-new-user");
+    expect(tokenStore().getUser()).toEqual({ id: "u-new" });
+  });
+
+  it("解析旧 refresh 响应期间新会话落库时仍会在最终提交前重新采用胜者", async () => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "R-old", expiresIn: 900 });
+    const response = rotatedResponse("AT-stale-old-user", "R-stale-old-user");
+    const originalJson = response.json.bind(response);
+    vi.spyOn(response, "json").mockImplementation(async () => {
+      tokenStore().setAuthenticatedSession(
+        { accessToken: "AT-new-user", refreshToken: "R-new-user", expiresIn: 900 },
+        { id: "u-new" },
+      );
+      setState({ user: { id: "u-new" }, status: "authenticated" });
+      return originalJson();
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => response));
+
+    await expect(refresh()).resolves.toBe("AT-new-user");
+    expect(tokenStore().getAccessToken()).toBe("AT-new-user");
+    expect(tokenStore().getRefreshToken()).toBe("R-new-user");
+    expect(tokenStore().getUser()).toEqual({ id: "u-new" });
   });
 
   it("falls back to a direct refresh when navigator.locks is unavailable (SSR / old browsers)", async () => {
@@ -330,14 +407,14 @@ describe("refresh(): 持久化提交失败", () => {
     vi.restoreAllMocks();
   });
 
-  it("轮换 token 第二次 setItem 失败时不留下混合会话，并透传 QuotaExceededError", async () => {
+  it("轮换 token 原子 record 写入失败时不留下混合会话，并透传 QuotaExceededError", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => rotatedResponse("AT-new", "RT-new")));
     const originalSetItem = Storage.prototype.setItem;
     let writes = 0;
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
       if (this === localStorage) {
         writes += 1;
-        if (writes === 2) throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+        if (writes === 1) throw new DOMException("Storage quota exceeded", "QuotaExceededError");
       }
       originalSetItem.call(this, key, value);
     });

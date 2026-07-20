@@ -124,7 +124,7 @@ async function doCompleteAuthorization(options: CompleteAuthorizationOptions): P
     options.authorizationCode,
     pending.verifier,
     config,
-    options.signal,
+    { signal: options.signal },
   );
   return { status: "authenticated", user, redirectPath: pending.redirectPath };
 }

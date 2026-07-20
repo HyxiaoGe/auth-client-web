@@ -10,6 +10,9 @@ export type AuthClientErrorCode =
   | "token_exchange_invalid_response"
   | "token_refresh_failed"
   | "token_refresh_invalid_response"
+  | "session_reconcile_failed"
+  | "session_reconcile_invalid_response"
+  | "session_reconcile_blocked"
   | "userinfo_failed"
   | "userinfo_invalid_response";
 
@@ -17,6 +20,7 @@ export type AuthClientErrorOptions = {
   code: AuthClientErrorCode;
   status?: number;
   retryable: boolean;
+  blocking?: boolean;
   cause?: unknown;
 };
 
@@ -26,11 +30,13 @@ export class AuthClientError extends Error {
   readonly code: AuthClientErrorCode;
   declare readonly status?: number;
   readonly retryable: boolean;
+  readonly blocking: boolean;
 
   constructor(message: string, options: AuthClientErrorOptions) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.code = options.code;
     this.retryable = options.retryable;
+    this.blocking = options.blocking ?? false;
     if (options.status !== undefined) this.status = options.status;
   }
 }

@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { configure, resetConfig } from "../src/config.js";
+import { AuthClientError } from "../src/errors.js";
 import { fetchWithAuth } from "../src/http.js";
+import { beginAuthSessionTransition, resetAuthRequestLifecycle } from "../src/request-lifecycle.js";
 import { resetTokens } from "../src/tokens.js";
 import { tokenStore } from "../src/session.js";
-import { resetStore } from "../src/store.js";
+import { resetStore, setState } from "../src/store.js";
 
 const AUTH = "https://auth.example";
 const API = "https://api.example/data";
@@ -19,6 +21,7 @@ describe("fetchWithAuth()", () => {
     resetConfig();
     resetStore();
     resetTokens();
+    resetAuthRequestLifecycle();
     localStorage.clear();
     configure({ authUrl: AUTH, clientId: "audio", redirectUri: "https://app/cb" });
   });
@@ -103,5 +106,43 @@ describe("fetchWithAuth()", () => {
     expect(captured?.body).toBe(JSON.stringify({ a: 1 }));
     expect(new Headers(captured?.headers).get("x-custom")).toBe("1"); // caller header preserved
     expect(authHeader(captured)).toBe("Bearer AT"); // ...alongside the injected bearer
+  });
+
+  it("账户切换屏障生效后拒绝发送新请求，不会继续使用旧身份或降级为匿名请求", async () => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 });
+    setState({ user: { id: "u-old" }, status: "synchronizing" });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchWithAuth(API, { method: "POST", body: "write" })).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "session_reconcile_blocked",
+      blocking: true,
+      retryable: true,
+    } satisfies Partial<AuthClientError>);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("账户切换会中止并拒绝旧 epoch 的迟到响应", async () => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 });
+    setState({ user: { id: "u-old" }, status: "authenticated" });
+    let resolveResponse!: (response: Response) => void;
+    const fetchMock = vi.fn(
+      async () => new Promise<Response>((resolve) => {
+        resolveResponse = resolve;
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = fetchWithAuth(API);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    beginAuthSessionTransition();
+    setState({ status: "synchronizing" });
+    resolveResponse(new Response("account-a", { status: 200 }));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "session_reconcile_blocked",
+      blocking: true,
+    } satisfies Partial<AuthClientError>);
   });
 });
