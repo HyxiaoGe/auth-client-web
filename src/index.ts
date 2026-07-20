@@ -41,6 +41,13 @@ export type {
 export { getAccessToken, refresh } from "./tokens.js";
 export { fetchWithAuth } from "./http.js";
 
+// 当前应用会话与中央 IdP Cookie 会话对账（账户无感切换）
+export { reconcileSession } from "./reconcile.js";
+export type {
+  ReconcileSessionOptions,
+  ReconcileSessionResult,
+} from "./reconcile.js";
+
 // Profile
 export { fetchUserInfo } from "./userinfo.js";
 

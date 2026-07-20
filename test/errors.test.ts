@@ -18,6 +18,21 @@ describe("AuthClientError public API", () => {
       code: "token_exchange_failed",
       status: 503,
       retryable: true,
+      blocking: false,
+    });
+  });
+
+  it("账户对账错误可显式标记 blocking，供宿主保持请求屏障", () => {
+    const error = new AuthClientError("switch pending", {
+      code: "session_reconcile_blocked",
+      retryable: true,
+      blocking: true,
+    });
+
+    expect(error).toMatchObject({
+      code: "session_reconcile_blocked",
+      retryable: true,
+      blocking: true,
     });
   });
 });

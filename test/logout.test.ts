@@ -8,6 +8,14 @@ import { getState, resetStore, setState } from "../src/store.js";
 
 const AUTH = "https://auth.example";
 
+function unsignedJwt(payload: Record<string, unknown>): string {
+  const encoded = btoa(JSON.stringify(payload))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return `eyJhbGciOiJub25lIn0.${encoded}.signature-not-verified-by-client`;
+}
+
 describe("logout()", () => {
   beforeEach(() => {
     resetConfig();
@@ -65,9 +73,10 @@ describe("logout()", () => {
     expect(redirect).toHaveBeenCalledWith("/goodbye");
   });
 
-  it("global logout: after the local clear, POST-form navigates to /auth/logout (defaults to config.redirectUri)", async () => {
+  it("global logout: 有 sid 时使用严格的 /auth/logout/session", async () => {
     setState({ user: { id: "u" }, status: "authenticated" });
-    tokenStore().setSession({ accessToken: "AT", refreshToken: "RT", expiresIn: 900 });
+    const sid = "source_sid_abcdefghijklmnopqrstuvwxyz123456";
+    tokenStore().setSession({ accessToken: unsignedJwt({ sid }), refreshToken: "RT", expiresIn: 900 });
     const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const submitForm = vi.spyOn(navigation, "submitForm").mockImplementation(() => {});
@@ -80,10 +89,47 @@ describe("logout()", () => {
     expect(getState()).toEqual({ user: null, status: "unauthenticated" });
     // then the Single Logout top-level POST-form, defaulting post_logout_redirect_uri to the
     // app's registered redirectUri so the 302 bounce-back is clean
+    expect(submitForm).toHaveBeenCalledWith(`${AUTH}/auth/logout/session`, {
+      post_logout_redirect_uri: "https://app/cb",
+      client_id: "audio",
+      session_sid: sid,
+    });
+  });
+
+  it("global logout: legacy access token 没有 sid 时保持省略字段兼容", async () => {
+    tokenStore().setSession({
+      accessToken: unsignedJwt({ sub: "u-legacy" }),
+      refreshToken: "RT",
+      expiresIn: 900,
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok", { status: 200 })));
+    const submitForm = vi.spyOn(navigation, "submitForm").mockImplementation(() => {});
+
+    await logout({ global: true });
+
     expect(submitForm).toHaveBeenCalledWith(`${AUTH}/auth/logout`, {
       post_logout_redirect_uri: "https://app/cb",
       client_id: "audio",
     });
+  });
+
+  it.each([
+    ["畸形 JWT", "not-a-jwt"],
+    ["非法 base64url", "header.***.signature"],
+    ["非对象 payload", "header.ImFiYyI.signature"],
+    ["非字符串 sid", unsignedJwt({ sid: 42 })],
+    ["过短 sid", unsignedJwt({ sid: "short" })],
+    ["包含非 url-safe 字符", unsignedJwt({ sid: "invalid sid value with spaces" })],
+    ["过长 sid", unsignedJwt({ sid: "a".repeat(129) })],
+  ])("global logout: %s 不向表单附加未经形状校验的 session_sid", async (_label, accessToken) => {
+    tokenStore().setSession({ accessToken, refreshToken: "RT", expiresIn: 900 });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ok", { status: 200 })));
+    const submitForm = vi.spyOn(navigation, "submitForm").mockImplementation(() => {});
+
+    await logout({ global: true });
+
+    const fields = submitForm.mock.calls[0]?.[1];
+    expect(fields).not.toHaveProperty("session_sid");
   });
 
   it("global logout: honors an explicit postLogoutRedirectUri override", async () => {

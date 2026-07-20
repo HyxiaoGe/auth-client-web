@@ -18,12 +18,13 @@
 import { getConfig } from "./config.js";
 import { AuthClientError, isRetryableStatus } from "./errors.js";
 import { tokenStore } from "./session.js";
-import { setState } from "./store.js";
+import { getState, setState } from "./store.js";
 import { parseTokenResponse } from "./token-response.js";
 
 let inFlight: Promise<string | null> | null = null;
 
 export async function getAccessToken(): Promise<string | null> {
+  assertSessionUsable();
   const store = tokenStore();
   if (!store.isExpired()) {
     return store.getAccessToken();
@@ -34,11 +35,26 @@ export async function getAccessToken(): Promise<string | null> {
 /** Force a refresh, coalescing concurrent callers onto a single network request (in-tab), then
  * serializing that request across tabs via a Web Lock so siblings can't replay a spent token. */
 export function refresh(): Promise<string | null> {
+  if (getState().status === "synchronizing") return Promise.reject(sessionBlockedError());
   if (inFlight) return inFlight;
   inFlight = withRefreshLock(doRefresh).finally(() => {
     inFlight = null;
   });
   return inFlight;
+}
+
+/** mismatch 已确认后绝不向调用方交出旧票据，也不触发旧 refresh token 轮换。 */
+function assertSessionUsable(): void {
+  if (getState().status !== "synchronizing") return;
+  throw sessionBlockedError();
+}
+
+function sessionBlockedError(): AuthClientError {
+  return new AuthClientError("auth-client-web: session is blocked while account synchronization is in progress.", {
+    code: "session_reconcile_blocked",
+    retryable: true,
+    blocking: true,
+  });
 }
 
 /** Run the refresh under a per-client Web Lock so only one tab refreshes at a time. Refresh
@@ -76,12 +92,17 @@ async function doRefresh(): Promise<string | null> {
   } catch (cause) {
     // 与 HTTP 失败相同：若等待期间其他标签页已完成轮换，优先采用胜者会话。
     if (store.getRefreshToken() !== refreshToken) return store.getAccessToken();
+    if (getState().status === "synchronizing") throw sessionBlockedError();
     throw new AuthClientError("Token refresh failed: network error", {
       code: "token_refresh_failed",
       retryable: true,
       cause,
     });
   }
+  // refresh 等待期间可能发生中央账户切换。兄弟标签已提交新会话时采用胜者；
+  // 只建立了切换屏障时则丢弃旧 sid 的响应，绝不能把旧账户重新写回。
+  if (store.getRefreshToken() !== refreshToken) return store.getAccessToken();
+  if (getState().status === "synchronizing") throw sessionBlockedError();
   if (!res.ok) {
     // Cross-tab rotation guard: refresh tokens rotate, so a sibling tab may have already spent
     // ours and persisted a fresh pair -- in which case THIS failure is stale, not a real logout.
@@ -111,6 +132,9 @@ async function doRefresh(): Promise<string | null> {
     message: "Token refresh failed: invalid token response",
     retryable: true,
   });
+  // response.json() 也是异步边界；解析期间兄弟标签可能已经提交新账户。
+  if (store.getRefreshToken() !== refreshToken) return store.getAccessToken();
+  if (getState().status === "synchronizing") throw sessionBlockedError();
   try {
     store.setSession({
       accessToken: tokens.access_token,

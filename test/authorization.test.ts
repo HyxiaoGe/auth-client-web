@@ -374,10 +374,7 @@ describe("headless authorization transaction", () => {
     expect(getState()).toEqual({ status: "authenticated", user: { id: "u-old", email: "old@example.com" } });
   });
 
-  it.each([
-    [2, "refresh token"],
-    [4, "user"],
-  ])("会话提交第 %i 次 setItem（%s）失败时清空持久会话且不发布新用户", async (failAt) => {
+  it("会话原子 record 提交失败时清空持久会话且不发布新用户", async () => {
     tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 });
     tokenStore().setUser({ id: "u-old", email: "old@example.com" });
     setState({ status: "authenticated", user: { id: "u-old", email: "old@example.com" } });
@@ -389,7 +386,7 @@ describe("headless authorization transaction", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
       if (this === localStorage) {
         localStorageWrites += 1;
-        if (localStorageWrites === failAt) {
+        if (localStorageWrites === 1) {
           throw new DOMException("Storage quota exceeded", "QuotaExceededError");
         }
       }

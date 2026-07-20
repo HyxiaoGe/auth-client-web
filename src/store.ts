@@ -3,7 +3,7 @@
  * App-side adapters (Zustand/Redux/React) subscribe and mirror this into their own store.
  */
 
-export type AuthStatus = "loading" | "authenticated" | "unauthenticated";
+export type AuthStatus = "loading" | "authenticated" | "unauthenticated" | "synchronizing";
 
 export type AuthUser = {
   id: string;
