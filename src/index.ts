@@ -12,6 +12,10 @@
 export { configure, getConfig } from "./config.js";
 export type { AuthConfig, ResolvedConfig, StorageKeys } from "./config.js";
 
+// Structured public errors
+export { AuthClientError } from "./errors.js";
+export type { AuthClientErrorCode, AuthClientErrorOptions } from "./errors.js";
+
 // Reactive state
 export { getState, subscribe } from "./store.js";
 export type { AuthState, AuthStatus, AuthUser } from "./store.js";

@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { configure, resetConfig } from "../src/config.js";
 import { handleCallback } from "../src/callback.js";
+import type { AuthClientError } from "../src/errors.js";
 import { startPendingAuth, takePendingAuth } from "../src/pending.js";
-import { resetStore, getState } from "../src/store.js";
+import { resetStore, getState, setState } from "../src/store.js";
 import { tokenStore } from "../src/session.js";
 
 const AUTH = "https://auth.example";
@@ -78,7 +79,11 @@ describe("handleCallback()", () => {
   it("rejects a state mismatch (CSRF) without exchanging the code", async () => {
     seedPending("v");
     const { calls } = stubFetch();
-    await expect(handleCallback("https://app/cb?code=AC-1&state=FORGED")).rejects.toThrow(/state/i);
+    await expect(handleCallback("https://app/cb?code=AC-1&state=FORGED")).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "authorization_state_invalid",
+      retryable: false,
+    } satisfies Partial<AuthClientError>);
     expect(calls.length).toBe(0); // never hit the token endpoint
     expect(tokenStore().getAccessToken()).toBeNull();
   });
@@ -121,6 +126,54 @@ describe("handleCallback()", () => {
     expect(result).toMatchObject({ status: "unauthenticated", error: "login_required" });
     expect(getState().status).toBe("unauthenticated");
     expect(takePendingAuth()).toBeNull(); // pending cleared even on the error path
+  });
+
+  it("已有完整认证会话时 error callback 保留会话并返回 authenticated", async () => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 });
+    tokenStore().setUser({ id: "u-old", email: "old@example.com" });
+    setState({ user: { id: "u-old", email: "old@example.com" }, status: "authenticated" });
+    sessionStorage.setItem("acw_redirect_path", "/keep-session");
+    const state = seedPending("v");
+
+    const result = await handleCallback(`https://app/cb?error=access_denied&state=${state}`);
+
+    expect(result).toMatchObject({
+      status: "authenticated",
+      user: { id: "u-old" },
+      redirectPath: "/keep-session",
+    });
+    expect(getState()).toEqual({
+      status: "authenticated",
+      user: { id: "u-old", email: "old@example.com" },
+    });
+    expect(tokenStore().getAccessToken()).toBe("AT-old");
+    expect(tokenStore().getRefreshToken()).toBe("RT-old");
+    expect(tokenStore().getUser()).toEqual({ id: "u-old", email: "old@example.com" });
+    expect(sessionStorage.getItem("acw_redirect_path")).toBeNull();
+  });
+
+  it("页面内存重置但持久层有完整会话时 error callback 恢复 authenticated", async () => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 });
+    tokenStore().setUser({ id: "u-old" });
+    const state = seedPending("v");
+
+    const result = await handleCallback(`https://app/cb?error=server_error&state=${state}`);
+
+    expect(result).toMatchObject({ status: "authenticated", user: { id: "u-old" } });
+    expect(getState()).toEqual({ status: "authenticated", user: { id: "u-old" } });
+  });
+
+  it("持久 token 不完整时 error callback 按冷会话处理并清除残留，避免伪认证", async () => {
+    localStorage.setItem("acw_access_token", "AT-orphan");
+    tokenStore().setUser({ id: "u-orphan" });
+    const state = seedPending("v");
+
+    const result = await handleCallback(`https://app/cb?error=login_required&state=${state}`);
+
+    expect(result).toEqual({ status: "unauthenticated", error: "login_required" });
+    expect(getState()).toEqual({ status: "unauthenticated", user: null });
+    expect(tokenStore().getAccessToken()).toBeNull();
+    expect(tokenStore().getUser()).toBeNull();
   });
 
   it("returns no_callback and leaves state alone when the URL has neither code nor error", async () => {

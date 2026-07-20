@@ -4,6 +4,8 @@
  * already-logged-in users) instead of being forced onto the SDK's neutral defaults.
  */
 
+import { AuthClientError } from "./errors.js";
+
 export type StorageKeys = {
   accessToken: string;
   refreshToken: string;
@@ -45,7 +47,10 @@ export function configure(config: AuthConfig): void {
 
 export function getConfig(): ResolvedConfig {
   if (current === null) {
-    throw new Error("auth-client-web: configure() must be called before use.");
+    throw new AuthClientError("auth-client-web: configure() must be called before use.", {
+      code: "configuration_error",
+      retryable: false,
+    });
   }
   return current;
 }

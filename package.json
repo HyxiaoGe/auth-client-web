@@ -1,15 +1,43 @@
 {
   "name": "auth-client-web",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Framework-neutral browser SDK for auth-service: silent SSO via /authorize (PKCE + state), token lifecycle, fetchWithAuth.",
+  "keywords": [
+    "authentication",
+    "oauth2",
+    "pkce",
+    "sso",
+    "browser",
+    "typescript"
+  ],
+  "homepage": "https://github.com/HyxiaoGe/auth-client-web#readme",
+  "bugs": {
+    "url": "https://github.com/HyxiaoGe/auth-client-web/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HyxiaoGe/auth-client-web.git"
+  },
+  "license": "MIT",
+  "author": "HyxiaoGe",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "files": [
     "dist",
@@ -20,12 +48,19 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "check:publish-workflow": "node scripts/verify-publish-workflow.mjs",
+    "lint:package": "publint",
+    "check": "npm run check:publish-workflow && npm run typecheck && npm test && npm run build && npm run lint:package",
+    "pack:dry-run": "npm pack --dry-run",
+    "prepublishOnly": "npm run check",
     "prepare": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^20",
     "jsdom": "^27.4.0",
+    "publint": "^0.3.21",
     "typescript": "^5",
+    "vite": "^8.1.5",
     "vitest": "^4.0.16"
   }
 }

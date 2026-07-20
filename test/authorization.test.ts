@@ -6,6 +6,7 @@ import {
   prepareAuthorization,
 } from "../src/authorization.js";
 import { configure, resetConfig } from "../src/config.js";
+import { AuthClientError } from "../src/errors.js";
 import { generatePkce } from "../src/pkce.js";
 import { startPendingAuth, takePendingAuth } from "../src/pending.js";
 import { getState, resetStore, setState } from "../src/store.js";
@@ -120,7 +121,11 @@ describe("headless authorization transaction", () => {
 
     await expect(
       completeAuthorization({ authorizationCode: "AC-forged", state: "unknown-state" }),
-    ).rejects.toThrow(/state/i);
+    ).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "authorization_state_invalid",
+      retryable: false,
+    } satisfies Partial<AuthClientError>);
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(transactionRecord(valid.state)).not.toBeNull();
@@ -171,9 +176,11 @@ describe("headless authorization transaction", () => {
     vi.stubGlobal("fetch", fetchMock);
     configure({ authUrl: AUTH, clientId: "other-client", redirectUri: "https://other.example/callback" });
 
-    await expect(completeAuthorization({ authorizationCode: "AC", state: prepared.state })).rejects.toThrow(
-      /client configuration/i,
-    );
+    await expect(completeAuthorization({ authorizationCode: "AC", state: prepared.state })).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "authorization_configuration_mismatch",
+      retryable: false,
+    } satisfies Partial<AuthClientError>);
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(transactionRecord(prepared.state)).not.toBeNull();
@@ -184,7 +191,11 @@ describe("headless authorization transaction", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(completeAuthorization({ authorizationCode: "", state: prepared.state })).rejects.toThrow(/code/i);
+    await expect(completeAuthorization({ authorizationCode: "", state: prepared.state })).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "authorization_code_invalid",
+      retryable: false,
+    } satisfies Partial<AuthClientError>);
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(transactionRecord(prepared.state)).not.toBeNull();
@@ -234,7 +245,11 @@ describe("headless authorization transaction", () => {
     const genuine = completeAuthorization({ authorizationCode: "AC-genuine", state: prepared.state });
     const conflicting = completeAuthorization({ authorizationCode: "AC-conflicting", state: prepared.state });
 
-    await expect(conflicting).rejects.toThrow(/authorization code|conflict/i);
+    await expect(conflicting).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "authorization_conflict",
+      retryable: false,
+    } satisfies Partial<AuthClientError>);
     releaseToken();
     await expect(genuine).resolves.toMatchObject({ status: "authenticated", user: { id: "u-1" } });
 
@@ -255,6 +270,78 @@ describe("headless authorization transaction", () => {
     await expect(completeAuthorization({ authorizationCode: "AC", state: prepared.state })).rejects.toThrow(/state/i);
   });
 
+  it("token exchange HTTP 失败会暴露结构化错误并保留兼容消息", async () => {
+    const prepared = await prepareAuthorization();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("bad", { status: 502 })));
+
+    await expect(completeAuthorization({ authorizationCode: "AC", state: prepared.state })).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "token_exchange_failed",
+      status: 502,
+      retryable: false,
+      message: "auth-client-web: token exchange failed (502).",
+    } satisfies Partial<AuthClientError>);
+  });
+
+  it("token exchange 网络异常因事务已消费而不可直接重试", async () => {
+    const prepared = await prepareAuthorization();
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("network down");
+    }));
+
+    const error = await completeAuthorization({ authorizationCode: "AC", state: prepared.state }).catch(
+      (reason: unknown) => reason,
+    );
+    expect(error).toMatchObject({
+      name: "AuthClientError",
+      code: "token_exchange_failed",
+      retryable: false,
+      message: "auth-client-web: token exchange failed (network error).",
+    } satisfies Partial<AuthClientError>);
+    expect(error).not.toHaveProperty("status");
+  });
+
+  it.each([
+    ["空 access_token", { access_token: "", refresh_token: "RT-new", expires_in: 900 }],
+    ["空 refresh_token", { access_token: "AT-new", refresh_token: " ", expires_in: 900 }],
+    ["字符串 expires_in", { access_token: "AT-new", refresh_token: "RT-new", expires_in: "900" }],
+    ["负 expires_in", { access_token: "AT-new", refresh_token: "RT-new", expires_in: -1 }],
+  ])("token exchange 拒绝%s且不请求 userinfo、不提交会话", async (_label, payload) => {
+    const prepared = await prepareAuthorization();
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(completeAuthorization({ authorizationCode: "AC", state: prepared.state })).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "token_exchange_invalid_response",
+      retryable: false,
+    } satisfies Partial<AuthClientError>);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(tokenStore().getAccessToken()).toBeNull();
+    expect(tokenStore().getRefreshToken()).toBeNull();
+  });
+
+  it("token exchange 拒绝异常 JSON，不请求 userinfo、不提交会话", async () => {
+    const prepared = await prepareAuthorization();
+    const fetchMock = vi.fn(async () =>
+      new Response("not-json", { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(completeAuthorization({ authorizationCode: "AC", state: prepared.state })).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "token_exchange_invalid_response",
+      retryable: false,
+    } satisfies Partial<AuthClientError>);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(tokenStore().getAccessToken()).toBeNull();
+  });
+
   it("userinfo 失败时不提交新 token/user/store，完整保留旧会话", async () => {
     tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 });
     tokenStore().setUser({ id: "u-old", email: "old@example.com" });
@@ -273,14 +360,50 @@ describe("headless authorization transaction", () => {
       }),
     );
 
-    await expect(completeAuthorization({ authorizationCode: "AC", state: prepared.state })).rejects.toThrow(
-      /userinfo/i,
-    );
+    await expect(completeAuthorization({ authorizationCode: "AC", state: prepared.state })).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "userinfo_failed",
+      status: 502,
+      retryable: false,
+      message: "auth-client-web: userinfo failed (502)",
+    } satisfies Partial<AuthClientError>);
 
     expect(tokenStore().getAccessToken()).toBe("AT-old");
     expect(tokenStore().getRefreshToken()).toBe("RT-old");
     expect(tokenStore().getUser()).toEqual({ id: "u-old", email: "old@example.com" });
     expect(getState()).toEqual({ status: "authenticated", user: { id: "u-old", email: "old@example.com" } });
+  });
+
+  it.each([
+    [2, "refresh token"],
+    [4, "user"],
+  ])("会话提交第 %i 次 setItem（%s）失败时清空持久会话且不发布新用户", async (failAt) => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 });
+    tokenStore().setUser({ id: "u-old", email: "old@example.com" });
+    setState({ status: "authenticated", user: { id: "u-old", email: "old@example.com" } });
+    const prepared = await prepareAuthorization();
+    stubSuccessfulCompletion();
+
+    const originalSetItem = Storage.prototype.setItem;
+    let localStorageWrites = 0;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (this === localStorage) {
+        localStorageWrites += 1;
+        if (localStorageWrites === failAt) {
+          throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+        }
+      }
+      originalSetItem.call(this, key, value);
+    });
+
+    await expect(
+      completeAuthorization({ authorizationCode: "AC", state: prepared.state }),
+    ).rejects.toMatchObject({ name: "QuotaExceededError" });
+
+    expect(tokenStore().getAccessToken()).toBeNull();
+    expect(tokenStore().getRefreshToken()).toBeNull();
+    expect(tokenStore().getUser()).toBeNull();
+    expect(getState()).toEqual({ status: "unauthenticated", user: null });
   });
 
   it("首次等待后 configure 切换不会改变 token/userinfo 端点或 storage keys 快照", async () => {

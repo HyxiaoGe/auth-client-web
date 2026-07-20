@@ -1,16 +1,11 @@
 /** 顶层跳转与 headless OAuth 流程共享的 authorization code 完成内核。 */
 
 import type { ResolvedConfig } from "./config.js";
+import { AuthClientError, isAbortError } from "./errors.js";
 import { createTokenStore } from "./storage.js";
 import { setState, type AuthUser } from "./store.js";
+import { parseTokenResponse } from "./token-response.js";
 import { fetchUserInfoForConfig } from "./userinfo.js";
-
-type TokenResponse = {
-  access_token: string;
-  refresh_token: string;
-  token_type: string;
-  expires_in: number;
-};
 
 export type AuthenticatedResult = {
   status: "authenticated";
@@ -28,31 +23,72 @@ export async function completeAuthorizationCode(
   config: ResolvedConfig,
   signal?: AbortSignal,
 ): Promise<AuthUser> {
-  const res = await fetch(`${config.authUrl}/auth/oauth/token`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    signal,
-    body: JSON.stringify({
-      code: authorizationCode,
-      client_id: config.clientId,
-      code_verifier: codeVerifier,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${config.authUrl}/auth/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal,
+      body: JSON.stringify({
+        code: authorizationCode,
+        client_id: config.clientId,
+        code_verifier: codeVerifier,
+      }),
+    });
+  } catch (cause) {
+    if (isAbortError(cause)) throw cause;
+    throw new AuthClientError("auth-client-web: token exchange failed (network error).", {
+      code: "token_exchange_failed",
+      retryable: false,
+      cause,
+    });
+  }
   if (!res.ok) {
-    throw new Error(`auth-client-web: token exchange failed (${res.status}).`);
+    throw new AuthClientError(`auth-client-web: token exchange failed (${res.status}).`, {
+      code: "token_exchange_failed",
+      status: res.status,
+      retryable: false,
+    });
   }
 
-  const tokens = (await res.json()) as TokenResponse;
+  const tokens = await parseTokenResponse(res, {
+    code: "token_exchange_invalid_response",
+    message: "auth-client-web: token exchange returned an invalid token response.",
+    retryable: false,
+  });
   // userinfo 成功前不触碰旧会话；失败或取消时，旧 token、旧 user 和全局 store
   // 必须作为一个整体保持不变，避免新 token 与旧用户错配。
-  const user = await fetchUserInfoForConfig(tokens.access_token, config, signal);
+  let user: AuthUser;
+  try {
+    user = await fetchUserInfoForConfig(tokens.access_token, config, signal);
+  } catch (error) {
+    // state/verifier 已在首次网络等待前消费，authorization code 也可能已被服务端兑换。
+    // 即便底层 userinfo 失败本身可重试，调用方也无法安全重放整笔授权事务。
+    if (error instanceof AuthClientError && error.retryable) {
+      throw new AuthClientError(error.message, {
+        code: error.code,
+        status: error.status,
+        retryable: false,
+        cause: error,
+      });
+    }
+    throw error;
+  }
   const store = createTokenStore(config.storageKeys);
-  store.setSession({
-    accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token,
-    expiresIn: tokens.expires_in,
-  });
-  store.setUser(user);
+  try {
+    store.setAuthenticatedSession(
+      {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        expiresIn: tokens.expires_in,
+      },
+      user,
+    );
+  } catch (error) {
+    // 持久层已经 fail closed；同步收敛内存状态，绝不发布仅写入一半的新用户会话。
+    setState({ user: null, status: "unauthenticated" });
+    throw error;
+  }
   setState({ user, status: "authenticated" });
   return user;
 }

@@ -1,0 +1,61 @@
+name: 发布 npm 包
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions: {}
+
+jobs:
+  publish:
+    if: vars.NPM_TRUSTED_PUBLISHING_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: 获取远端 master 完整历史
+        run: git fetch --no-tags --prune origin +refs/heads/master:refs/remotes/origin/master
+
+      - name: 校验 tag 提交已进入 master
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "拒绝发布：tag 提交 $GITHUB_SHA 不在 origin/master 历史中。" >&2
+            exit 1
+          fi
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: 校验 tag 与包版本一致
+        run: >-
+          node -e "const version = require('./package.json').version;
+          if (process.env.GITHUB_REF_NAME !== 'v' + version) {
+            console.error('tag ' + process.env.GITHUB_REF_NAME + ' 与 package.json@' + version + ' 不一致');
+            process.exit(1);
+          }"
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 检查高危依赖
+        run: npm audit --audit-level=high
+
+      - name: 执行发布门禁
+        run: npm run check
+
+      - name: 发布到 npm
+        run: npm publish --access public --provenance
