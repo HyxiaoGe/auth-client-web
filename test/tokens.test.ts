@@ -312,3 +312,41 @@ describe("refresh(): token 响应运行时校验", () => {
     expect(tokenStore().getRefreshToken()).toBe("RT-old");
   });
 });
+
+describe("refresh(): 持久化提交失败", () => {
+  beforeEach(() => {
+    resetConfig();
+    resetStore();
+    resetTokens();
+    localStorage.clear();
+    configure({ authUrl: AUTH, clientId: "audio", redirectUri: "https://app/cb" });
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: -100 });
+    tokenStore().setUser({ id: "u-old" });
+    setState({ user: { id: "u-old" }, status: "authenticated" });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("轮换 token 第二次 setItem 失败时不留下混合会话，并透传 QuotaExceededError", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => rotatedResponse("AT-new", "RT-new")));
+    const originalSetItem = Storage.prototype.setItem;
+    let writes = 0;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (this === localStorage) {
+        writes += 1;
+        if (writes === 2) throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+      }
+      originalSetItem.call(this, key, value);
+    });
+
+    await expect(refresh()).rejects.toMatchObject({ name: "QuotaExceededError" });
+
+    expect(tokenStore().getAccessToken()).toBeNull();
+    expect(tokenStore().getRefreshToken()).toBeNull();
+    expect(tokenStore().getUser()).toBeNull();
+    expect(getState()).toEqual({ user: null, status: "unauthenticated" });
+  });
+});

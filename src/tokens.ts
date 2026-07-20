@@ -111,11 +111,17 @@ async function doRefresh(): Promise<string | null> {
     message: "Token refresh failed: invalid token response",
     retryable: true,
   });
-  store.setSession({
-    accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token,
-    expiresIn: tokens.expires_in,
-  });
+  try {
+    store.setSession({
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      expiresIn: tokens.expires_in,
+    });
+  } catch (error) {
+    // 持久层已 fail closed；同步清理内存认证态，并透传原始存储错误供调用方诊断。
+    setState({ user: null, status: "unauthenticated" });
+    throw error;
+  }
   return tokens.access_token;
 }
 

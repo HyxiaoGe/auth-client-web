@@ -188,15 +188,16 @@ npm publish
 1. 在 npm 包设置中把 `HyxiaoGe/auth-client-web`、工作流 `publish.yml` 和 GitHub environment `npm` 配置为 Trusted Publisher，并把 `npm publish` 选为 allowed action。
 2. 在 GitHub 创建名为 `npm` 的 environment，并配置 required reviewers。
 3. 在仓库 Variables 中显式设置 `NPM_TRUSTED_PUBLISHING_ENABLED=true`。变量未设置时，tag 只会被忽略，不会触发真实发布。
-4. 确保 `package.json` 的版本尚未发布，并让 tag 严格等于 `v<package version>`。
+4. 确保 `package.json` 的版本尚未发布，让 tag 严格等于 `v<package version>`，并且 tag 指向的提交已经进入远端 `master` 历史。侧分支提交即使被打上版本 tag，也会在发布前被拒绝。
 
 发布前在本地执行：
 
 ```bash
 npm run check
 npm run pack:dry-run
+git push origin master
 git tag v0.2.2
 git push origin v0.2.2
 ```
 
-最后两条命令中的版本必须替换为当前 `package.json` 版本。tag 工作流会再次执行依赖安装、审计、类型检查、测试、构建和 publint；tag 与包版本不一致时会失败。发布命令使用 GitHub OIDC 和 npm provenance，不读取 `NPM_TOKEN`。
+tag 命令中的版本必须替换为当前 `package.json` 版本。tag 工作流会拉取完整 Git 历史并显式更新 `origin/master`，确认 tag 提交是 `origin/master` 的祖先后，再执行依赖安装、审计、类型检查、测试、构建和 publint；提交不在 `master` 或 tag 与包版本不一致时都会失败。发布命令使用 GitHub OIDC 和 npm provenance，不读取 `NPM_TOKEN`。

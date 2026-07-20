@@ -17,6 +17,7 @@ export type SessionTokens = {
 
 export type TokenStore = {
   setSession(tokens: SessionTokens): void;
+  setAuthenticatedSession(tokens: SessionTokens, user: unknown): void;
   getAccessToken(): string | null;
   getRefreshToken(): string | null;
   isExpired(skewMs?: number): boolean;
@@ -26,11 +27,36 @@ export type TokenStore = {
 };
 
 export function createTokenStore(keys: StorageKeys, now: () => number = () => Date.now()): TokenStore {
+  const clearStoredSession = (): void => {
+    localStorage.removeItem(keys.accessToken);
+    localStorage.removeItem(keys.refreshToken);
+    localStorage.removeItem(keys.expiresAt);
+    localStorage.removeItem(keys.user);
+  };
+
   return {
     setSession(tokens) {
-      localStorage.setItem(keys.accessToken, tokens.accessToken);
-      localStorage.setItem(keys.refreshToken, tokens.refreshToken);
-      localStorage.setItem(keys.expiresAt, String(now() + tokens.expiresIn * 1000));
+      try {
+        localStorage.setItem(keys.accessToken, tokens.accessToken);
+        localStorage.setItem(keys.refreshToken, tokens.refreshToken);
+        localStorage.setItem(keys.expiresAt, String(now() + tokens.expiresIn * 1000));
+      } catch (error) {
+        clearStoredSession();
+        throw error;
+      }
+    },
+    setAuthenticatedSession(tokens, user) {
+      try {
+        localStorage.setItem(keys.accessToken, tokens.accessToken);
+        localStorage.setItem(keys.refreshToken, tokens.refreshToken);
+        localStorage.setItem(keys.expiresAt, String(now() + tokens.expiresIn * 1000));
+        localStorage.setItem(keys.user, JSON.stringify(user));
+      } catch (error) {
+        // localStorage 没有跨 key 事务；配额耗尽后 setItem 回滚也可能继续失败。
+        // removeItem 不受配额限制，因此提交失败时 fail closed，避免新 token 与旧用户混存。
+        clearStoredSession();
+        throw error;
+      }
     },
     getAccessToken() {
       return localStorage.getItem(keys.accessToken);
@@ -58,10 +84,7 @@ export function createTokenStore(keys: StorageKeys, now: () => number = () => Da
       }
     },
     clear() {
-      localStorage.removeItem(keys.accessToken);
-      localStorage.removeItem(keys.refreshToken);
-      localStorage.removeItem(keys.expiresAt);
-      localStorage.removeItem(keys.user);
+      clearStoredSession();
     },
   };
 }

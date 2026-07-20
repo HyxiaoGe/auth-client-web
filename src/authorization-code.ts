@@ -75,12 +75,20 @@ export async function completeAuthorizationCode(
     throw error;
   }
   const store = createTokenStore(config.storageKeys);
-  store.setSession({
-    accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token,
-    expiresIn: tokens.expires_in,
-  });
-  store.setUser(user);
+  try {
+    store.setAuthenticatedSession(
+      {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        expiresIn: tokens.expires_in,
+      },
+      user,
+    );
+  } catch (error) {
+    // 持久层已经 fail closed；同步收敛内存状态，绝不发布仅写入一半的新用户会话。
+    setState({ user: null, status: "unauthenticated" });
+    throw error;
+  }
   setState({ user, status: "authenticated" });
   return user;
 }

@@ -20,6 +20,18 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: 获取远端 master 完整历史
+        run: git fetch --no-tags --prune origin +refs/heads/master:refs/remotes/origin/master
+
+      - name: 校验 tag 提交已进入 master
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "拒绝发布：tag 提交 $GITHUB_SHA 不在 origin/master 历史中。" >&2
+            exit 1
+          fi
 
       - name: 配置 Node.js
         uses: actions/setup-node@v6

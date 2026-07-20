@@ -28,6 +28,9 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: 校验 npm 发布工作流门禁
+        run: npm run check:publish-workflow
+
       - name: 安装依赖
         run: npm ci
 

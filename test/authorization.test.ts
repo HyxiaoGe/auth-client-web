@@ -374,6 +374,38 @@ describe("headless authorization transaction", () => {
     expect(getState()).toEqual({ status: "authenticated", user: { id: "u-old", email: "old@example.com" } });
   });
 
+  it.each([
+    [2, "refresh token"],
+    [4, "user"],
+  ])("会话提交第 %i 次 setItem（%s）失败时清空持久会话且不发布新用户", async (failAt) => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 });
+    tokenStore().setUser({ id: "u-old", email: "old@example.com" });
+    setState({ status: "authenticated", user: { id: "u-old", email: "old@example.com" } });
+    const prepared = await prepareAuthorization();
+    stubSuccessfulCompletion();
+
+    const originalSetItem = Storage.prototype.setItem;
+    let localStorageWrites = 0;
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (this === localStorage) {
+        localStorageWrites += 1;
+        if (localStorageWrites === failAt) {
+          throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+        }
+      }
+      originalSetItem.call(this, key, value);
+    });
+
+    await expect(
+      completeAuthorization({ authorizationCode: "AC", state: prepared.state }),
+    ).rejects.toMatchObject({ name: "QuotaExceededError" });
+
+    expect(tokenStore().getAccessToken()).toBeNull();
+    expect(tokenStore().getRefreshToken()).toBeNull();
+    expect(tokenStore().getUser()).toBeNull();
+    expect(getState()).toEqual({ status: "unauthenticated", user: null });
+  });
+
   it("首次等待后 configure 切换不会改变 token/userinfo 端点或 storage keys 快照", async () => {
     configure({
       authUrl: "https://auth-a.example",
