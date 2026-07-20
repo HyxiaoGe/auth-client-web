@@ -12,6 +12,7 @@ import {
   peekPendingAuthorization,
 } from "./authorization-pending.js";
 import { getConfigSnapshot } from "./config.js";
+import { AuthClientError } from "./errors.js";
 import { generatePkce } from "./pkce.js";
 
 export type PrepareAuthorizationOptions = {
@@ -69,7 +70,10 @@ export function completeAuthorization(options: CompleteAuthorizationOptions): Pr
   if (existing !== undefined) {
     if (existing.authorizationCode === options.authorizationCode) return existing.promise;
     return Promise.reject(
-      new Error("auth-client-web: conflicting authorization code for an in-flight state."),
+      new AuthClientError("auth-client-web: conflicting authorization code for an in-flight state.", {
+        code: "authorization_conflict",
+        retryable: false,
+      }),
     );
   }
 
@@ -87,18 +91,30 @@ export function completeAuthorization(options: CompleteAuthorizationOptions): Pr
 
 async function doCompleteAuthorization(options: CompleteAuthorizationOptions): Promise<AuthenticatedResult> {
   if (options.authorizationCode.length === 0) {
-    throw new Error("auth-client-web: authorization code must not be empty.");
+    throw new AuthClientError("auth-client-web: authorization code must not be empty.", {
+      code: "authorization_code_invalid",
+      retryable: false,
+    });
   }
 
   const pending = peekPendingAuthorization(options.state);
   if (pending === null) {
-    throw new Error("auth-client-web: unknown, expired, or mismatched state for authorization completion.");
+    throw new AuthClientError("auth-client-web: unknown, expired, or mismatched state for authorization completion.", {
+      code: "authorization_state_invalid",
+      retryable: false,
+    });
   }
 
   const config = getConfigSnapshot();
   const { authUrl, clientId, redirectUri } = config;
   if (pending.authUrl !== authUrl || pending.clientId !== clientId || pending.redirectUri !== redirectUri) {
-    throw new Error("auth-client-web: authorization transaction does not match the active client configuration.");
+    throw new AuthClientError(
+      "auth-client-web: authorization transaction does not match the active client configuration.",
+      {
+        code: "authorization_configuration_mismatch",
+        retryable: false,
+      },
+    );
   }
 
   // state 与客户端绑定已经验证。在首次网络等待前消费事务，避免重放或独立调用方

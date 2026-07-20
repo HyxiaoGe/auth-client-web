@@ -16,15 +16,10 @@
  */
 
 import { getConfig } from "./config.js";
+import { AuthClientError, isRetryableStatus } from "./errors.js";
 import { tokenStore } from "./session.js";
 import { setState } from "./store.js";
-
-type TokenResponse = {
-  access_token: string;
-  refresh_token: string;
-  token_type: string;
-  expires_in: number;
-};
+import { parseTokenResponse } from "./token-response.js";
 
 let inFlight: Promise<string | null> | null = null;
 
@@ -71,11 +66,22 @@ async function doRefresh(): Promise<string | null> {
   }
 
   const { authUrl } = getConfig();
-  const res = await fetch(`${authUrl}/auth/token/refresh`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ refresh_token: refreshToken }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${authUrl}/auth/token/refresh`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+  } catch (cause) {
+    // 与 HTTP 失败相同：若等待期间其他标签页已完成轮换，优先采用胜者会话。
+    if (store.getRefreshToken() !== refreshToken) return store.getAccessToken();
+    throw new AuthClientError("Token refresh failed: network error", {
+      code: "token_refresh_failed",
+      retryable: true,
+      cause,
+    });
+  }
   if (!res.ok) {
     // Cross-tab rotation guard: refresh tokens rotate, so a sibling tab may have already spent
     // ours and persisted a fresh pair -- in which case THIS failure is stale, not a real logout.
@@ -94,9 +100,17 @@ async function doRefresh(): Promise<string | null> {
     // turn a dropped/sluggish response into a spurious logout. Keep the token and throw so the
     // caller treats it as transient -- the unchanged token gets retried and auth-service's
     // rotation-grace window re-issues the successor.
-    throw new Error(`Token refresh failed: ${res.status}`);
+    throw new AuthClientError(`Token refresh failed: ${res.status}`, {
+      code: "token_refresh_failed",
+      status: res.status,
+      retryable: isRetryableStatus(res.status),
+    });
   }
-  const tokens = (await res.json()) as TokenResponse;
+  const tokens = await parseTokenResponse(res, {
+    code: "token_refresh_invalid_response",
+    message: "Token refresh failed: invalid token response",
+    retryable: true,
+  });
   store.setSession({
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,

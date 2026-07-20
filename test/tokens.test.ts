@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { configure, resetConfig } from "../src/config.js";
+import { AuthClientError } from "../src/errors.js";
 import { getAccessToken, refresh, resetTokens } from "../src/tokens.js";
 import { tokenStore } from "../src/session.js";
 import { getState, resetStore, setState } from "../src/store.js";
@@ -218,7 +219,13 @@ describe("refresh(): transient (5xx/429) vs definitive (401/403) failure", () =>
 
   it("does NOT log out on a 5xx -- keeps the token and throws (transient)", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 502 })));
-    await expect(refresh()).rejects.toThrow();
+    await expect(refresh()).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "token_refresh_failed",
+      status: 502,
+      retryable: true,
+      message: "Token refresh failed: 502",
+    } satisfies Partial<AuthClientError>);
     expect(getState().status).toBe("authenticated"); // session preserved
     expect(tokenStore().getRefreshToken()).toBe("RT"); // token kept for the next retry
   });
@@ -228,5 +235,80 @@ describe("refresh(): transient (5xx/429) vs definitive (401/403) failure", () =>
     await expect(refresh()).rejects.toThrow();
     expect(getState().status).toBe("authenticated");
     expect(tokenStore().getRefreshToken()).toBe("RT");
+  });
+
+  it("网络异常会转成可重试的结构化错误，并保留既有会话", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("network down");
+    }));
+
+    await expect(refresh()).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "token_refresh_failed",
+      retryable: true,
+      message: "Token refresh failed: network error",
+    } satisfies Partial<AuthClientError>);
+    expect(tokenStore().getAccessToken()).toBe("AT");
+    expect(tokenStore().getRefreshToken()).toBe("RT");
+    expect(getState().status).toBe("authenticated");
+  });
+});
+
+describe("refresh(): token 响应运行时校验", () => {
+  beforeEach(() => {
+    resetConfig();
+    resetStore();
+    resetTokens();
+    localStorage.clear();
+    configure({ authUrl: AUTH, clientId: "audio", redirectUri: "https://app/cb" });
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: -100 });
+    setState({ user: { id: "u1" }, status: "authenticated" });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ["空 access_token", { access_token: "", refresh_token: "RT2", expires_in: 900 }],
+    ["空 refresh_token", { access_token: "AT2", refresh_token: "   ", expires_in: 900 }],
+    ["字符串 expires_in", { access_token: "AT2", refresh_token: "RT2", expires_in: "900" }],
+    ["非正 expires_in", { access_token: "AT2", refresh_token: "RT2", expires_in: 0 }],
+  ])("拒绝%s且不覆盖旧 token", async (_label, payload) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(refresh()).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "token_refresh_invalid_response",
+      retryable: true,
+    } satisfies Partial<AuthClientError>);
+    expect(tokenStore().getAccessToken()).toBe("AT-old");
+    expect(tokenStore().getRefreshToken()).toBe("RT-old");
+    expect(getState()).toEqual({ user: { id: "u1" }, status: "authenticated" });
+  });
+
+  it("拒绝异常 JSON 且不覆盖旧 token", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response("not-json", { status: 200, headers: { "content-type": "application/json" } }),
+      ),
+    );
+
+    await expect(refresh()).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "token_refresh_invalid_response",
+      retryable: true,
+    } satisfies Partial<AuthClientError>);
+    expect(tokenStore().getAccessToken()).toBe("AT-old");
+    expect(tokenStore().getRefreshToken()).toBe("RT-old");
   });
 });

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { configure, resetConfig } from "../src/config.js";
 import { fetchUserInfo } from "../src/userinfo.js";
+import { AuthClientError } from "../src/errors.js";
 
 describe("fetchUserInfo()", () => {
   beforeEach(() => {
@@ -61,6 +62,42 @@ describe("fetchUserInfo()", () => {
       "fetch",
       vi.fn(async () => new Response("nope", { status: 401 })),
     );
-    await expect(fetchUserInfo("bad")).rejects.toThrow();
+    await expect(fetchUserInfo("bad")).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "userinfo_failed",
+      status: 401,
+      retryable: false,
+      message: "auth-client-web: userinfo failed (401)",
+    } satisfies Partial<AuthClientError>);
+  });
+
+  it("网络异常会转成可重试的结构化错误", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("network down");
+    }));
+
+    const error = await fetchUserInfo("AT").catch((reason: unknown) => reason);
+    expect(error).toMatchObject({
+      name: "AuthClientError",
+      code: "userinfo_failed",
+      retryable: true,
+      message: "auth-client-web: userinfo failed (network error)",
+    } satisfies Partial<AuthClientError>);
+    expect(error).not.toHaveProperty("status");
+  });
+
+  it("异常 JSON 会转成不可重试的协议错误", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response("not-json", { status: 200, headers: { "content-type": "application/json" } }),
+      ),
+    );
+
+    await expect(fetchUserInfo("AT")).rejects.toMatchObject({
+      name: "AuthClientError",
+      code: "userinfo_invalid_response",
+      retryable: false,
+    } satisfies Partial<AuthClientError>);
   });
 });

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { configure, getConfig, resetConfig } from "../src/config.js";
+import type { AuthClientError } from "../src/errors.js";
 
 describe("configure / getConfig", () => {
   beforeEach(() => {
@@ -9,6 +10,15 @@ describe("configure / getConfig", () => {
 
   it("throws if used before configure()", () => {
     expect(() => getConfig()).toThrow(/configure/i);
+    try {
+      getConfig();
+    } catch (error) {
+      expect(error).toMatchObject({
+        name: "AuthClientError",
+        code: "configuration_error",
+        retryable: false,
+      } satisfies Partial<AuthClientError>);
+    }
   });
 
   it("returns the resolved config with default storage keys filled in", () => {
