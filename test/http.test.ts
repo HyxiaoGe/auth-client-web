@@ -123,6 +123,26 @@ describe("fetchWithAuth()", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("B 会话已落库但 switched 事件未投递时不发送 A 页面发起的业务请求", async () => {
+    tokenStore().setAuthenticatedSession(
+      { accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 },
+      { id: "u-old" },
+    );
+    setState({ user: { id: "u-old" }, status: "authenticated" });
+    tokenStore().setAuthenticatedSession(
+      { accessToken: "AT-new", refreshToken: "RT-new", expiresIn: 3600 },
+      { id: "u-new" },
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchWithAuth(API, { method: "POST", body: "account-a-write" })).rejects.toMatchObject({
+      code: "session_reconcile_blocked",
+      blocking: true,
+    } satisfies Partial<AuthClientError>);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("账户切换会中止并拒绝旧 epoch 的迟到响应", async () => {
     tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 });
     setState({ user: { id: "u-old" }, status: "authenticated" });

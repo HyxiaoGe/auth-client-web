@@ -30,6 +30,7 @@ describe("getAccessToken() + refresh coalescing", () => {
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("returns the stored token without a network call when it is still fresh", async () => {
@@ -55,6 +56,34 @@ describe("getAccessToken() + refresh coalescing", () => {
       blocking: true,
     } satisfies Partial<AuthClientError>);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("共享存储已提交 B 但切换事件尚未投递时同步阻断 A 请求", async () => {
+    tokenStore().setAuthenticatedSession(
+      { accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 3600 },
+      { id: "u-old" },
+    );
+    setState({ user: { id: "u-old" }, status: "authenticated" });
+
+    // 模拟兄弟标签完成原子 B 会话提交，但 switched 事件仍排在浏览器任务队列中。
+    tokenStore().setAuthenticatedSession(
+      { accessToken: "AT-new", refreshToken: "RT-new", expiresIn: 3600 },
+      { id: "u-new" },
+    );
+    const observedStatuses: string[] = [];
+    const unsubscribe = (await import("../src/store.js")).subscribe((state) => {
+      observedStatuses.push(state.status);
+    });
+
+    await expect(getAccessToken()).rejects.toMatchObject({
+      code: "session_reconcile_blocked",
+      blocking: true,
+    } satisfies Partial<AuthClientError>);
+
+    unsubscribe();
+    expect(observedStatuses).toEqual(["synchronizing", "authenticated"]);
+    expect(getState()).toEqual({ user: { id: "u-new" }, status: "authenticated" });
+    expect(await getAccessToken()).toBe("AT-new");
   });
 
   it("refreshes an expired token and persists the rotated pair", async () => {
@@ -122,18 +151,27 @@ describe("getAccessToken() + refresh coalescing", () => {
  * auth-service's refresh-reuse detection (which revokes every token for the user). */
 function fakeLockManager() {
   const names: string[] = [];
-  let held = false;
+  const held = new Set<string>();
+  const tails = new Map<string, Promise<void>>();
   return {
     names,
-    isHeld: () => held,
+    isHeld: (name?: string) => name === undefined ? held.size > 0 : held.has(name),
     manager: {
       request: async (name: string, cb: () => Promise<unknown>) => {
         names.push(name);
-        held = true;
+        const previous = tails.get(name) ?? Promise.resolve();
+        let release!: () => void;
+        const current = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        tails.set(name, previous.then(() => current));
+        await previous;
+        held.add(name);
         try {
           return await cb();
         } finally {
-          held = false;
+          held.delete(name);
+          release();
         }
       },
     },
@@ -157,6 +195,7 @@ describe("refresh(): cross-tab coalescing via Web Locks", () => {
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("routes the refresh through a per-client Web Lock when navigator.locks is available", async () => {
@@ -167,7 +206,10 @@ describe("refresh(): cross-tab coalescing via Web Locks", () => {
 
     const token = await refresh();
 
-    expect(lock.names).toEqual(["auth-client-web:refresh:fusion"]);
+    expect(lock.names).toEqual([
+      "auth-client-web:refresh:fusion",
+      "auth-client-web:session-mutation:fusion",
+    ]);
     expect(token).toBe("AT2");
     expect(tokenStore().getRefreshToken()).toBe("R2"); // rotated inside the lock
   });
@@ -188,6 +230,82 @@ describe("refresh(): cross-tab coalescing via Web Locks", () => {
     await refresh();
 
     expect(heldWhenFetched).toEqual([true]); // the POST /auth/token/refresh fired inside the lock
+  });
+
+  it("最终 CAS 后排队提交 B 时，A refresh 成功结果不能在统一写锁外覆盖 B", async () => {
+    tokenStore().setAuthenticatedSession(
+      { accessToken: "AT-old", refreshToken: "R-old", expiresIn: 900 },
+      { id: "u-old" },
+    );
+    setState({ user: { id: "u-old" }, status: "authenticated" });
+    const lock = fakeLockManager();
+    vi.stubGlobal("navigator", { locks: lock.manager });
+    vi.stubGlobal("fetch", vi.fn(async () => rotatedResponse("AT-old-rotated", "R-old-rotated")));
+
+    const originalGetItem = Storage.prototype.getItem;
+    let queuedSwitch: Promise<unknown> | null = null;
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, key: string) {
+      const value = originalGetItem.call(this, key);
+      if (
+        queuedSwitch === null &&
+        key.startsWith("auth-client-web:session:v1:") &&
+        lock.isHeld("auth-client-web:session-mutation:fusion")
+      ) {
+        queuedSwitch = lock.manager.request("auth-client-web:session-mutation:fusion", async () => {
+          tokenStore().setAuthenticatedSession(
+            { accessToken: "AT-B", refreshToken: "R-B", expiresIn: 900 },
+            { id: "u-B" },
+          );
+          setState({ user: { id: "u-B" }, status: "authenticated" });
+        });
+      }
+      return value;
+    });
+
+    await refresh();
+    await queuedSwitch;
+
+    expect(tokenStore().getAccessToken()).toBe("AT-B");
+    expect(tokenStore().getRefreshToken()).toBe("R-B");
+    expect(tokenStore().getUser()).toEqual({ id: "u-B" });
+  });
+
+  it("最终 CAS 后排队提交 B 时，A refresh 的 401 清理不能删除 B", async () => {
+    tokenStore().setAuthenticatedSession(
+      { accessToken: "AT-old", refreshToken: "R-old", expiresIn: 900 },
+      { id: "u-old" },
+    );
+    setState({ user: { id: "u-old" }, status: "authenticated" });
+    const lock = fakeLockManager();
+    vi.stubGlobal("navigator", { locks: lock.manager });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("rejected", { status: 401 })));
+
+    const originalGetItem = Storage.prototype.getItem;
+    let queuedSwitch: Promise<unknown> | null = null;
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, key: string) {
+      const value = originalGetItem.call(this, key);
+      if (
+        queuedSwitch === null &&
+        key.startsWith("auth-client-web:session:v1:") &&
+        lock.isHeld("auth-client-web:session-mutation:fusion")
+      ) {
+        queuedSwitch = lock.manager.request("auth-client-web:session-mutation:fusion", async () => {
+          tokenStore().setAuthenticatedSession(
+            { accessToken: "AT-B", refreshToken: "R-B", expiresIn: 900 },
+            { id: "u-B" },
+          );
+          setState({ user: { id: "u-B" }, status: "authenticated" });
+        });
+      }
+      return value;
+    });
+
+    await expect(refresh()).resolves.toBeNull();
+    await queuedSwitch;
+
+    expect(tokenStore().getAccessToken()).toBe("AT-B");
+    expect(tokenStore().getRefreshToken()).toBe("R-B");
+    expect(tokenStore().getUser()).toEqual({ id: "u-B" });
   });
 
   it("refresh 等待期间账户切换屏障生效时丢弃旧 sid 的成功响应", async () => {

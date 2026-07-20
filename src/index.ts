@@ -48,6 +48,10 @@ export type {
   ReconcileSessionResult,
 } from "./reconcile.js";
 
+// 无本地票据时，从中央 IdP Cookie 无跳转恢复当前应用会话
+export { resumeSession } from "./resume.js";
+export type { ResumeSessionOptions, ResumeSessionResult } from "./resume.js";
+
 // Profile
 export { fetchUserInfo } from "./userinfo.js";
 
@@ -61,3 +65,5 @@ export type { PkcePair } from "./pkce.js";
 export { createTokenStore } from "./storage.js";
 export type { SessionTokens, TokenStore } from "./storage.js";
 export { tokenStore } from "./session.js";
+export { clearLocalSessionIfCurrent } from "./session-clear.js";
+export type { ClearLocalSessionResult } from "./session-clear.js";

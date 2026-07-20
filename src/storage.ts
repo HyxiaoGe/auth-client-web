@@ -14,7 +14,7 @@ export type SessionTokens = {
   expiresIn: number;
 };
 
-type StoredSession = {
+export type SessionSnapshot = {
   version: 1;
   accessToken: string;
   refreshToken: string;
@@ -25,6 +25,7 @@ type StoredSession = {
 export type TokenStore = {
   setSession(tokens: SessionTokens): void;
   setAuthenticatedSession(tokens: SessionTokens, user: unknown): void;
+  getSessionSnapshot(): SessionSnapshot | null;
   getAccessToken(): string | null;
   getRefreshToken(): string | null;
   isExpired(skewMs?: number): boolean;
@@ -37,9 +38,9 @@ function recordKey(keys: StorageKeys): string {
   return `auth-client-web:session:v1:${keys.accessToken}`;
 }
 
-function isStoredSession(value: unknown): value is StoredSession {
+function isStoredSession(value: unknown): value is SessionSnapshot {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record = value as Partial<StoredSession>;
+  const record = value as Partial<SessionSnapshot>;
   return (
     record.version === 1 &&
     typeof record.accessToken === "string" &&
@@ -54,7 +55,7 @@ function isStoredSession(value: unknown): value is StoredSession {
 export function createTokenStore(keys: StorageKeys, now: () => number = () => Date.now()): TokenStore {
   const sessionKey = recordKey(keys);
 
-  const readCanonical = (): StoredSession | null => {
+  const readCanonical = (): SessionSnapshot | null => {
     const raw = localStorage.getItem(sessionKey);
     if (raw === null) return null;
     try {
@@ -65,7 +66,7 @@ export function createTokenStore(keys: StorageKeys, now: () => number = () => Da
     }
   };
 
-  const readLegacy = (): StoredSession | null => {
+  const readLegacy = (): SessionSnapshot | null => {
     const accessToken = localStorage.getItem(keys.accessToken);
     const refreshToken = localStorage.getItem(keys.refreshToken);
     const rawExpiry = localStorage.getItem(keys.expiresAt);
@@ -84,9 +85,9 @@ export function createTokenStore(keys: StorageKeys, now: () => number = () => Da
     return { version: 1, accessToken, refreshToken, expiresAt, user };
   };
 
-  const read = (): StoredSession | null => readCanonical() ?? readLegacy();
+  const read = (): SessionSnapshot | null => readCanonical() ?? readLegacy();
 
-  const mirrorLegacy = (session: StoredSession): void => {
+  const mirrorLegacy = (session: SessionSnapshot): void => {
     // 同步镜像只服务仍直接读取旧 key 的 0.2.x 宿主；新 SDK 永不把它们当权威。
     // record 已先原子提交，即使镜像因配额失败也不能回滚为旧身份。
     try {
@@ -100,7 +101,7 @@ export function createTokenStore(keys: StorageKeys, now: () => number = () => Da
     }
   };
 
-  const commit = (session: StoredSession): void => {
+  const commit = (session: SessionSnapshot): void => {
     try {
       localStorage.setItem(sessionKey, JSON.stringify(session));
     } catch (error) {
@@ -137,6 +138,9 @@ export function createTokenStore(keys: StorageKeys, now: () => number = () => Da
         expiresAt: now() + tokens.expiresIn * 1000,
         user,
       });
+    },
+    getSessionSnapshot() {
+      return read();
     },
     getAccessToken() {
       return read()?.accessToken ?? null;

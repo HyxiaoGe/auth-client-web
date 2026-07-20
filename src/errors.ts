@@ -13,6 +13,8 @@ export type AuthClientErrorCode =
   | "session_reconcile_failed"
   | "session_reconcile_invalid_response"
   | "session_reconcile_blocked"
+  | "session_resume_failed"
+  | "session_resume_invalid_response"
   | "userinfo_failed"
   | "userinfo_invalid_response";
 

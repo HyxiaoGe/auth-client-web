@@ -20,6 +20,7 @@ import { takeRedirectPath } from "./authorize.js";
 import { getConfigSnapshot } from "./config.js";
 import { AuthClientError } from "./errors.js";
 import { createTokenStore } from "./storage.js";
+import { withSessionMutationLock } from "./session-mutation.js";
 
 export type CallbackResult =
   | AuthenticatedResult
@@ -66,25 +67,28 @@ export async function handleCallback(url: string = window.location.href): Promis
   // Provider/IdP reported an error (e.g. login_required from a silent probe).
   if (error !== null) {
     const config = getConfigSnapshot();
-    const tokenStore = createTokenStore(config.storageKeys);
-    const accessToken = tokenStore.getAccessToken();
-    const refreshToken = tokenStore.getRefreshToken();
-    const cachedUser = normalizeCachedUser(tokenStore.getUser());
-    if (
-      accessToken !== null &&
-      accessToken.trim().length > 0 &&
-      refreshToken !== null &&
-      refreshToken.trim().length > 0 &&
-      cachedUser !== null
-    ) {
-      setState({ user: cachedUser, status: "authenticated" });
-      return { status: "authenticated", user: cachedUser, redirectPath: takeRedirectPath() };
-    }
+    return withSessionMutationLock(config, async () => {
+      const tokenStore = createTokenStore(config.storageKeys);
+      const accessToken = tokenStore.getAccessToken();
+      const refreshToken = tokenStore.getRefreshToken();
+      const cachedUser = normalizeCachedUser(tokenStore.getUser());
+      if (
+        accessToken !== null &&
+        accessToken.trim().length > 0 &&
+        refreshToken !== null &&
+        refreshToken.trim().length > 0 &&
+        cachedUser !== null
+      ) {
+        setState({ user: cachedUser, status: "authenticated" });
+        return { status: "authenticated", user: cachedUser, redirectPath: takeRedirectPath() };
+      }
 
-    // 只有完整 token pair + 有效缓存用户才能恢复认证；残缺持久状态应原子清除。
-    tokenStore.clear();
-    setState({ user: null, status: "unauthenticated" });
-    return { status: "unauthenticated", error };
+      // 只有完整 token pair + 有效缓存用户才能恢复认证；残缺持久状态应在统一写锁内清除，
+      // 不能覆盖兄弟标签刚提交的完整新会话。
+      tokenStore.clear();
+      setState({ user: null, status: "unauthenticated" });
+      return { status: "unauthenticated", error };
+    });
   }
 
   // 上面的 no-callback 分支已在运行时证明该不变量；这里显式声明，帮助 TypeScript

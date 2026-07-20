@@ -16,6 +16,7 @@ import { AuthClientError, isAbortError, isRetryableStatus } from "./errors.js";
 import { generatePkce } from "./pkce.js";
 import { beginAuthSessionTransition } from "./request-lifecycle.js";
 import { publishSessionSync } from "./session-sync.js";
+import { withSessionMutationLock } from "./session-mutation.js";
 import { createTokenStore } from "./storage.js";
 import { getState, setState, type AuthUser } from "./store.js";
 
@@ -46,31 +47,11 @@ let inFlight: Promise<ReconcileSessionResult> | null = null;
 export function reconcileSession(options: ReconcileSessionOptions = {}): Promise<ReconcileSessionResult> {
   if (inFlight !== null) return inFlight;
   const config = getConfigSnapshot();
-  const operation = withReconcileLock(config, () => doReconcile(config, options)).finally(() => {
+  const operation = withSessionMutationLock(config, () => doReconcile(config, options)).finally(() => {
     if (inFlight === operation) inFlight = null;
   });
   inFlight = operation;
   return operation;
-}
-
-async function withReconcileLock(
-  config: ResolvedConfig,
-  run: () => Promise<ReconcileSessionResult>,
-): Promise<ReconcileSessionResult> {
-  const locks = globalThis.navigator?.locks;
-  if (!locks?.request) return run();
-  let result: ReconcileSessionResult | undefined;
-  await locks.request(`auth-client-web:reconcile:${config.clientId}`, async () => {
-    // 必须在拿到跨标签锁后重读 localStorage；等待期间兄弟标签页可能已经完成换票。
-    result = await run();
-  });
-  if (result === undefined) {
-    throw new AuthClientError("auth-client-web: session reconcile lock completed without a result.", {
-      code: "session_reconcile_failed",
-      retryable: true,
-    });
-  }
-  return result;
 }
 
 async function doReconcile(
@@ -152,7 +133,6 @@ async function doReconcile(
     throw blockedError("auth-client-web: confirmed session switch could not be completed.", cause);
   }
 
-  publishSessionSync("switched", config);
   return { status: "switched", previousUser, user: prepared.user };
 }
 

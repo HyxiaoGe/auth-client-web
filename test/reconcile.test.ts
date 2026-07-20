@@ -312,6 +312,6 @@ describe("reconcileSession", () => {
       { status: "match" },
     ]);
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(lockNames).toEqual(["auth-client-web:reconcile:fusion"]);
+    expect(lockNames).toEqual(["auth-client-web:session-mutation:fusion"]);
   });
 });

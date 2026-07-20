@@ -3,6 +3,8 @@
 import type { ResolvedConfig } from "./config.js";
 import { AuthClientError, isAbortError } from "./errors.js";
 import { createTokenStore } from "./storage.js";
+import { withSessionMutationLock } from "./session-mutation.js";
+import { publishSessionSync } from "./session-sync.js";
 import { setState, type AuthUser } from "./store.js";
 import { parseTokenResponse } from "./token-response.js";
 import { fetchUserInfoForConfig } from "./userinfo.js";
@@ -39,9 +41,11 @@ export async function completeAuthorizationCode(
   config: ResolvedConfig,
   options: CompleteAuthorizationCodeOptions = {},
 ): Promise<AuthUser> {
-  const session = await exchangeAuthorizationCode(authorizationCode, codeVerifier, config, options);
-  commitAuthenticatedSession(session, config);
-  return session.user;
+  return withSessionMutationLock(config, async () => {
+    const session = await exchangeAuthorizationCode(authorizationCode, codeVerifier, config, options);
+    commitAuthenticatedSession(session, config);
+    return session.user;
+  });
 }
 
 /**
@@ -132,4 +136,5 @@ export function commitAuthenticatedSession(
     throw error;
   }
   setState({ user: session.user, status: "authenticated" });
+  publishSessionSync("switched", config);
 }
