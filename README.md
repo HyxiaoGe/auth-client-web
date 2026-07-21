@@ -9,7 +9,7 @@ Framework-neutral browser SDK for **auth-service**。提供 PKCE 跳转登录、
 npm registry 正式包是自用项目和第三方项目的默认安装方式。`0.x` 阶段次版本仍可能调整公共 API，因此建议锁定当前兼容范围并提交 lockfile：
 
 ```bash
-npm install auth-client-web@^0.4.0
+npm install auth-client-web@^0.4.1
 ```
 
 包只提供 ESM，不提供 CommonJS 构建。ESM 项目可以直接静态导入；CommonJS 工具链需要使用动态 `import("auth-client-web")`，或由应用构建工具完成 ESM 转换。
@@ -17,14 +17,14 @@ npm install auth-client-web@^0.4.0
 只有无法访问 npm registry 时才使用 Git tag 备用安装；不要依赖会移动的默认分支：
 
 ```bash
-npm install github:HyxiaoGe/auth-client-web#v0.4.0
+npm install github:HyxiaoGe/auth-client-web#v0.4.1
 ```
 
 Git 安装会通过 `prepare` 自动构建 `dist/`，安装时间和工具链要求都高于正式包，不应作为正常接入方式。
 
 ## 状态
 
-`0.4.0` 已发布到 npm。它新增无页面跳转的中央会话恢复、同源多标签会话采用，以及统一的跨标签会话写锁；继续兼容 `login()`、`silentLogin()`、`handleCallback()`、headless authorization transaction 和既有存储键。
+`0.4.1` 修复同一会话事件经 `storage` 与 `BroadcastChannel` 重复投递、损坏快照导致永久同步，以及对账成功后内存状态无法恢复的问题；继续兼容 `login()`、`silentLogin()`、`handleCallback()`、headless authorization transaction 和既有存储键。
 
 ## 接入前准备
 

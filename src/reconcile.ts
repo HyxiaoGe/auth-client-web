@@ -15,7 +15,7 @@ import { randomUrlSafe } from "./encoding.js";
 import { AuthClientError, isAbortError, isRetryableStatus } from "./errors.js";
 import { generatePkce } from "./pkce.js";
 import { beginAuthSessionTransition } from "./request-lifecycle.js";
-import { publishSessionSync } from "./session-sync.js";
+import { publishSessionSync, synchronizeFromStoredSession } from "./session-sync.js";
 import { withSessionMutationLock } from "./session-mutation.js";
 import { createTokenStore } from "./storage.js";
 import { getState, setState, type AuthUser } from "./store.js";
@@ -104,7 +104,13 @@ async function doReconcile(
   }
 
   const reconciled = await parseReconcileResponse(response);
-  if (reconciled.status === "match" || reconciled.status === "no_session") {
+  if (reconciled.status === "match") {
+    // 前一轮已经确认切换但未完成时，内存会话会保留同步屏障。服务端重新确认
+    // 当前票据匹配后，只能从完整权威快照恢复；快照缺失或损坏则 fail closed。
+    if (getState().status === "synchronizing") synchronizeFromStoredSession(config);
+    return reconciled;
+  }
+  if (reconciled.status === "no_session") {
     return reconciled;
   }
 

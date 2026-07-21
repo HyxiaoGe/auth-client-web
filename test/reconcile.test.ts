@@ -74,6 +74,29 @@ describe("reconcileSession", () => {
     },
   );
 
+  it("此前切换失败遗留同步屏障时，match 从完整持久快照幂等恢复认证态", async () => {
+    const oldUser = seedSession();
+    setState({ user: oldUser, status: "synchronizing" });
+    vi.stubGlobal("fetch", vi.fn(async () => json({ status: "match" })));
+
+    await expect(reconcileSession()).resolves.toEqual({ status: "match" });
+
+    expect(getState()).toEqual({ user: oldUser, status: "authenticated" });
+    expect(tokenStore().getAccessToken()).toBe("AT-old");
+  });
+
+  it("同步屏障期间 match 但持久快照缺少 user 时 fail closed", async () => {
+    tokenStore().setSession({ accessToken: "AT-old", refreshToken: "RT-old", expiresIn: 900 });
+    setState({ user: { id: "u-old" }, status: "synchronizing" });
+    vi.stubGlobal("fetch", vi.fn(async () => json({ status: "match" })));
+
+    await expect(reconcileSession()).resolves.toEqual({ status: "match" });
+
+    expect(getState()).toEqual({ user: null, status: "unauthenticated" });
+    expect(tokenStore().getAccessToken()).toBeNull();
+    expect(tokenStore().getUser()).toBeNull();
+  });
+
   it("没有本地 access token 时不访问中央会话，也不改变本地状态", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

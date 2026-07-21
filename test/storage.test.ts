@@ -149,4 +149,18 @@ describe("createTokenStore", () => {
       access === "AT-new" && refresh === "RT-new" && (user as { id: string }).id === "u-new"
     )).toBe(true);
   });
+
+  it("权威 record 存在但损坏时不会回退到 legacy 镜像", () => {
+    const store = createTokenStore(KEYS, () => 1_000_000);
+    store.setAuthenticatedSession(
+      { accessToken: "AT", refreshToken: "RT", expiresIn: 900 },
+      { id: "u" },
+    );
+    localStorage.setItem("auth-client-web:session:v1:a", "{broken-json");
+
+    expect(store.getSessionSnapshot()).toBeNull();
+    expect(store.getAccessToken()).toBeNull();
+    expect(store.getRefreshToken()).toBeNull();
+    expect(store.getUser()).toBeNull();
+  });
 });

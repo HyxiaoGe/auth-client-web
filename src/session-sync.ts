@@ -12,6 +12,7 @@ import { createTokenStore } from "./storage.js";
 import { setState, type AuthUser } from "./store.js";
 
 const EVENT_VERSION = 1 as const;
+const MAX_SEEN_EVENTS = 128;
 
 type SessionSyncEvent = {
   version: typeof EVENT_VERSION;
@@ -25,6 +26,7 @@ type ActiveSync = {
   storageKey: string;
   channel: BroadcastChannel | null;
   onStorage: (event: StorageEvent) => void;
+  seenNonces: Set<string>;
 };
 
 let active: ActiveSync | null = null;
@@ -73,6 +75,16 @@ function applyEvent(event: SessionSyncEvent, config: ResolvedConfig): void {
   synchronizeFromStoredSession(config);
 }
 
+function claimEvent(event: SessionSyncEvent, seenNonces: Set<string>): boolean {
+  if (seenNonces.has(event.nonce)) return false;
+  seenNonces.add(event.nonce);
+  if (seenNonces.size > MAX_SEEN_EVENTS) {
+    const oldest = seenNonces.values().next().value;
+    if (typeof oldest === "string") seenNonces.delete(oldest);
+  }
+  return true;
+}
+
 /**
  * 从已经原子提交的共享会话同步当前标签。
  *
@@ -92,6 +104,11 @@ export function synchronizeFromStoredSession(config: ResolvedConfig): void {
     typeof user.id !== "string" ||
     user.id.length === 0
   ) {
+    try {
+      store.clear();
+    } finally {
+      setState({ user: null, status: "unauthenticated" });
+    }
     return;
   }
   setState({ user, status: "authenticated" });
@@ -102,13 +119,14 @@ export function configureSessionSync(config: ResolvedConfig): void {
   if (typeof window === "undefined") return;
 
   const storageKey = eventKey(config.clientId);
+  const seenNonces = new Set<string>();
   let channel: BroadcastChannel | null = null;
   if (typeof BroadcastChannel !== "undefined") {
     try {
       channel = new BroadcastChannel(channelName(config.clientId));
       channel.addEventListener("message", (message: MessageEvent<unknown>) => {
         const event = parseEvent(message.data, config.clientId);
-        if (event !== null) applyEvent(event, config);
+        if (event !== null && claimEvent(event, seenNonces)) applyEvent(event, config);
       });
     } catch {
       channel = null;
@@ -118,10 +136,10 @@ export function configureSessionSync(config: ResolvedConfig): void {
   const onStorage = (storageEvent: StorageEvent): void => {
     if (storageEvent.key !== storageKey || storageEvent.newValue === null) return;
     const event = parseEvent(storageEvent.newValue, config.clientId);
-    if (event !== null) applyEvent(event, config);
+    if (event !== null && claimEvent(event, seenNonces)) applyEvent(event, config);
   };
   window.addEventListener("storage", onStorage);
-  active = { config, storageKey, channel, onStorage };
+  active = { config, storageKey, channel, onStorage, seenNonces };
 }
 
 export function publishSessionSync(type: SessionSyncEvent["type"], config: ResolvedConfig): void {
@@ -154,5 +172,6 @@ export function disposeSessionSync(): void {
   } catch {
     // best-effort cleanup only
   }
+  active.seenNonces.clear();
   active = null;
 }

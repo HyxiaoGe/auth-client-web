@@ -55,14 +55,14 @@ function isStoredSession(value: unknown): value is SessionSnapshot {
 export function createTokenStore(keys: StorageKeys, now: () => number = () => Date.now()): TokenStore {
   const sessionKey = recordKey(keys);
 
-  const readCanonical = (): SessionSnapshot | null => {
+  const readCanonical = (): { present: boolean; session: SessionSnapshot | null } => {
     const raw = localStorage.getItem(sessionKey);
-    if (raw === null) return null;
+    if (raw === null) return { present: false, session: null };
     try {
       const parsed = JSON.parse(raw) as unknown;
-      return isStoredSession(parsed) ? parsed : null;
+      return { present: true, session: isStoredSession(parsed) ? parsed : null };
     } catch {
-      return null;
+      return { present: true, session: null };
     }
   };
 
@@ -85,7 +85,11 @@ export function createTokenStore(keys: StorageKeys, now: () => number = () => Da
     return { version: 1, accessToken, refreshToken, expiresAt, user };
   };
 
-  const read = (): SessionSnapshot | null => readCanonical() ?? readLegacy();
+  const read = (): SessionSnapshot | null => {
+    const canonical = readCanonical();
+    // 权威 record 一旦存在就不能回退到可能属于旧身份的兼容镜像。
+    return canonical.present ? canonical.session : readLegacy();
+  };
 
   const mirrorLegacy = (session: SessionSnapshot): void => {
     // 同步镜像只服务仍直接读取旧 key 的 0.2.x 宿主；新 SDK 永不把它们当权威。
@@ -162,8 +166,14 @@ export function createTokenStore(keys: StorageKeys, now: () => number = () => Da
       commit({ ...session, user });
     },
     getUser<T = unknown>(): T | null {
-      const session = read();
-      if (session !== null) return (session.user as T | null | undefined) ?? null;
+      const canonical = readCanonical();
+      if (canonical.present) {
+        return (canonical.session?.user as T | null | undefined) ?? null;
+      }
+      const legacySession = readLegacy();
+      if (legacySession !== null) {
+        return (legacySession.user as T | null | undefined) ?? null;
+      }
       const raw = localStorage.getItem(keys.user);
       if (raw === null) return null;
       try {
