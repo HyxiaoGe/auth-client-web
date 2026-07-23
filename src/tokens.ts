@@ -112,26 +112,21 @@ async function doRefresh(config: ResolvedConfig): Promise<string | null> {
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
   } catch (cause) {
-    // 与 HTTP 失败相同：若等待期间其他标签页已完成轮换，优先采用胜者会话。
+    // 对旋转型 refresh token，网络异常无法证明请求是否已在服务端生效。任何时间窗口
+    // 重放都存在竞态，因此新 SDK 不消费 rotation grace：立即隔离旧票据并交给中央 SSO 恢复。
     if (store.getRefreshToken() !== refreshToken) return readUsableAccessToken(store);
     if (getState().status === "synchronizing") throw sessionBlockedError();
-    throw new AuthClientError("Token refresh failed: network error", {
-      code: "token_refresh_failed",
-      retryable: true,
+    return quarantineUnknownRefreshOutcome(config, store, refreshToken, {
+      message: "Token refresh outcome is unknown: network error",
       cause,
     });
   }
+
   // refresh 等待期间可能发生中央账户切换。兄弟标签已提交新会话时采用胜者；
   // 只建立了切换屏障时则丢弃旧 sid 的响应，绝不能把旧账户重新写回。
   if (store.getRefreshToken() !== refreshToken) return readUsableAccessToken(store);
   if (getState().status === "synchronizing") throw sessionBlockedError();
   if (!res.ok) {
-    // Cross-tab rotation guard: refresh tokens rotate, so a sibling tab may have already spent
-    // ours and persisted a fresh pair -- in which case THIS failure is stale, not a real logout.
-    // Only act on it if the stored refresh token is still the one we just sent.
-    if (store.getRefreshToken() !== refreshToken) {
-      return readUsableAccessToken(store);
-    }
     // Definitive rejection (401/403): final CAS + clear 必须与所有 callback/reconcile/resume
     // 共用 session-mutation 锁，否则 B 可在“仍是 A”的检查后落库又被迟到的 A 清掉。
     if (res.status === 401 || res.status === 403) {
@@ -144,22 +139,37 @@ async function doRefresh(config: ResolvedConfig): Promise<string | null> {
         return null;
       });
     }
-    // Transient failure (5xx, 429, gateway/error page from a flaky tunnel): the rotation may well
-    // have succeeded server-side with its response lost in transit. Clearing the session here would
-    // turn a dropped/sluggish response into a spurious logout. Keep the token and throw so the
-    // caller treats it as transient -- the unchanged token gets retried and auth-service's
-    // rotation-grace window re-issues the successor.
+    // 5xx/408/425 不能证明服务端未完成轮换，同样禁止重放。429 是明确的限流响应，
+    // 服务端没有消费 refresh token，故保留会话并向宿主返回可重试错误。
+    if (isRetryableStatus(res.status) && res.status !== 429) {
+      return quarantineUnknownRefreshOutcome(config, store, refreshToken, {
+        message: `Token refresh outcome is unknown: ${res.status}`,
+        status: res.status,
+      });
+    }
     throw new AuthClientError(`Token refresh failed: ${res.status}`, {
       code: "token_refresh_failed",
       status: res.status,
       retryable: isRetryableStatus(res.status),
     });
   }
-  const tokens = await parseTokenResponse(res, {
-    code: "token_refresh_invalid_response",
-    message: "Token refresh failed: invalid token response",
-    retryable: true,
-  });
+
+  let tokens: Awaited<ReturnType<typeof parseTokenResponse>>;
+  try {
+    tokens = await parseTokenResponse(res, {
+      code: "token_refresh_invalid_response",
+      message: "Token refresh failed: invalid token response",
+      retryable: true,
+    });
+  } catch (error) {
+    // 200 响应体异常时服务端通常已经完成轮换，旧 refresh token 必须立即隔离。
+    if (store.getRefreshToken() !== refreshToken) return readUsableAccessToken(store);
+    if (getState().status === "synchronizing") throw sessionBlockedError();
+    return quarantineUnknownRefreshOutcome(config, store, refreshToken, {
+      message: "Token refresh outcome is unknown: invalid token response",
+      cause: error,
+    });
+  }
   // response.json() 也是异步边界。最终重读、比较与写回作为一个同步临界区放进统一
   // session-mutation 锁；兄弟标签的 B 提交只能发生在它之前或之后，不能插进 CAS 与写入之间。
   return withSessionMutationLock(config, async () => {
@@ -185,6 +195,39 @@ function readUsableAccessToken(store: TokenStore): string | null {
   const snapshot = store.getSessionSnapshot();
   assertSessionUsable(snapshot?.user);
   return snapshot?.accessToken ?? null;
+}
+
+/**
+ * 单次 refresh 结果不可确认时，旧 refresh token 已不能再安全重放。
+ *
+ * 在统一 mutation 锁内做最终 CAS：兄弟标签若已提交继任票据则采用胜者；否则仅清除
+ * 本客户端本地会话并发出 unauthenticated，交由宿主立即走中央 Cookie SSO 恢复。
+ * 这不是服务端登出，不会撤销仍有效的中央会话。
+ */
+async function quarantineUnknownRefreshOutcome(
+  config: ResolvedConfig,
+  store: TokenStore,
+  refreshToken: string,
+  details: { message: string; status?: number; cause?: unknown },
+): Promise<string | null> {
+  let quarantined = false;
+  const winner = await withSessionMutationLock(config, async () => {
+    const latest = store.getSessionSnapshot();
+    assertSessionUsable(latest?.user);
+    if (latest?.refreshToken !== refreshToken) return latest?.accessToken ?? null;
+    store.clear();
+    setState({ user: null, status: "unauthenticated" });
+    quarantined = true;
+    return null;
+  });
+  if (!quarantined) return winner;
+
+  throw new AuthClientError(details.message, {
+    code: "token_refresh_outcome_unknown",
+    status: details.status,
+    retryable: false,
+    cause: details.cause,
+  });
 }
 
 /** Test hook: drop any in-flight refresh between cases. */

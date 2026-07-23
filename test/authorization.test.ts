@@ -209,6 +209,7 @@ describe("headless authorization transaction", () => {
     const result = await completeAuthorization({ authorizationCode: "AC-1", state: prepared.state });
 
     const tokenCall = calls.find((call) => call.url.endsWith("/auth/oauth/token"))!;
+    expect(tokenCall.init?.credentials).toBe("include");
     expect(JSON.parse(tokenCall.init?.body as string)).toEqual({
       code: "AC-1",
       client_id: "fusion",

@@ -1,6 +1,6 @@
 {
   "name": "auth-client-web",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Framework-neutral browser SDK for auth-service: PKCE SSO, secure session reconciliation, token lifecycle, fetchWithAuth.",
   "keywords": [
     "authentication",

@@ -10,6 +10,7 @@ export type AuthClientErrorCode =
   | "token_exchange_invalid_response"
   | "token_refresh_failed"
   | "token_refresh_invalid_response"
+  | "token_refresh_outcome_unknown"
   | "session_reconcile_failed"
   | "session_reconcile_invalid_response"
   | "session_reconcile_blocked"

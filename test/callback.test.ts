@@ -60,6 +60,7 @@ describe("handleCallback()", () => {
     // token exchange carried the PERSISTED verifier and our client_id, as JSON
     const tokenCall = calls.find((c) => c.url.endsWith("/auth/oauth/token"))!;
     expect(tokenCall.init?.method).toBe("POST");
+    expect(tokenCall.init?.credentials).toBe("include");
     expect(JSON.parse(tokenCall.init!.body as string)).toEqual({
       code: "AC-1",
       client_id: "audio",

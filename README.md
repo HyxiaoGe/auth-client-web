@@ -181,7 +181,7 @@ document.addEventListener("visibilitychange", () => {
 
 `resumeSession()` 与 `reconcileSession()` 会分别合流同标签并发调用；宿主仍应避免同时注册多个高频定时器。`beforeCommit` 必须停止 SSE/WebSocket 和旧用户请求、清理用户绑定缓存，再允许新账户数据进入页面。
 
-`reconcileSession()` 故意不在内部 refresh：账户切换后旧 sid 可能已经撤销，但对账仍需要原始票据中的绑定。raw access token 返回 401 时，宿主可以像上例一样只 refresh 一次并重试一次；refresh 被 401/403 明确拒绝后再走 `resumeSession()`。网络错误、429 或 5xx 是可重试故障，必须保留旧会话，不能当作退出。`no_session` 默认不会删除本地 token；要求“中央退出后聚焦即退出”的产品可以在收到该状态后清理用户数据并调用本地 `logout()`。
+`reconcileSession()` 故意不在内部 refresh：账户切换后旧 sid 可能已经撤销，但对账仍需要原始票据中的绑定。raw access token 返回 401 时，宿主可以像上例一样只 refresh 一次并重试一次；refresh 被 401/403 明确拒绝后再走 `resumeSession()`。429 等明确未轮换的可重试响应会保留旧会话；网络丢响应、5xx 或无效成功响应无法证明服务端是否已经完成轮换，SDK 不会重放一次性 refresh token，而是立即抛出 `token_refresh_outcome_unknown` 并隔离旧票据。宿主必须随即走 `resumeSession()`，不能继续重试旧票据。`no_session` 默认不会删除本地 token；要求“中央退出后聚焦即退出”的产品可以在收到该状态后清理用户数据并调用本地 `logout()`。
 
 `silentLogin()` 仍保留兼容：它会顶层跳转到 `/auth/authorize?prompt=none`，无中央会话时再带 `error=login_required` 返回回调页。仅在 auth-service 尚未提供 `/auth/session/resume`，或产品明确接受一次顶层往返时使用：
 
@@ -313,13 +313,17 @@ session_sid=<本地 access token 的 sid>
 公共网络、协议和授权事务错误会抛出 `AuthClientError`。调用方应判断稳定的 `code`、`status` 和 `retryable`，不要解析 `message`；兼容消息只为旧应用迁移保留。
 
 ```ts
-import { AuthClientError, getAccessToken } from "auth-client-web";
+import { AuthClientError, getAccessToken, resumeSession } from "auth-client-web";
 
 try {
   await getAccessToken();
 } catch (error) {
+  if (error instanceof AuthClientError && error.code === "token_refresh_outcome_unknown") {
+    // 旧 refresh token 已被隔离；立即用中央 Cookie SSO 恢复，禁止再次重放。
+    await resumeSession();
+  }
   if (error instanceof AuthClientError && error.retryable) {
-    // 网络、限流或 refresh 响应丢失：保留现有会话，稍后重试。
+    // 例如明确的限流响应：保留现有会话，稍后重试。
   }
 }
 ```

@@ -63,7 +63,7 @@ export async function exchangeAuthorizationCode(
     res = await fetch(`${config.authUrl}/auth/oauth/token`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      credentials: options.credentials,
+      credentials: options.credentials ?? "include",
       signal: options.signal,
       body: JSON.stringify({
         code: authorizationCode,

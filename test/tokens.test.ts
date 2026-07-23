@@ -379,11 +379,11 @@ describe("refresh(): cross-tab coalescing via Web Locks", () => {
   });
 });
 
-/** A rotation RESPONSE lost over a flaky tunnel surfaces to the client as a 5xx / 429 / error page,
- * NOT a clean 401. Treating those transient failures as a logout is the passive-logout bug: a
- * dropped response must never clear the session. Only a definitive 401/403 (refresh token actually
- * rejected) logs out; anything else is kept and rethrown so the caller retries (and auth-service's
- * rotation-grace window re-issues the successor). */
+/** A rotation RESPONSE lost over a flaky tunnel can surface as a 5xx / network error, not a clean
+ * 401. A client-side clock cannot prove a replay still falls inside auth-service's grace window,
+ * so the SDK never replays a one-time refresh token after an ambiguous outcome. It quarantines the
+ * old token and lets the host recover through central SSO. A definitive 401/403 logs out; 429 is
+ * preserved because the server explicitly answered without rotating. */
 describe("refresh(): transient (5xx/429) vs definitive (401/403) failure", () => {
   beforeEach(() => {
     resetConfig();
@@ -412,17 +412,19 @@ describe("refresh(): transient (5xx/429) vs definitive (401/403) failure", () =>
     expect(tokenStore().getRefreshToken()).toBeNull();
   });
 
-  it("does NOT log out on a 5xx -- keeps the token and throws (transient)", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 502 })));
+  it("单次 5xx 后隔离不可安全重放的旧 refresh token", async () => {
+    const fetchMock = vi.fn(async () => new Response("boom", { status: 502 }));
+    vi.stubGlobal("fetch", fetchMock);
     await expect(refresh()).rejects.toMatchObject({
       name: "AuthClientError",
-      code: "token_refresh_failed",
+      code: "token_refresh_outcome_unknown",
       status: 502,
-      retryable: true,
-      message: "Token refresh failed: 502",
+      retryable: false,
+      message: "Token refresh outcome is unknown: 502",
     } satisfies Partial<AuthClientError>);
-    expect(getState().status).toBe("authenticated"); // session preserved
-    expect(tokenStore().getRefreshToken()).toBe("RT"); // token kept for the next retry
+    expect(getState().status).toBe("unauthenticated");
+    expect(tokenStore().getRefreshToken()).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT log out on a 429 -- transient", async () => {
@@ -432,20 +434,51 @@ describe("refresh(): transient (5xx/429) vs definitive (401/403) failure", () =>
     expect(tokenStore().getRefreshToken()).toBe("RT");
   });
 
-  it("网络异常会转成可重试的结构化错误，并保留既有会话", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => {
+  it("单次网络异常后隔离旧会话，绝不重放结果未知的一次性票据", async () => {
+    const fetchMock = vi.fn(async () => {
       throw new TypeError("network down");
-    }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(refresh()).rejects.toMatchObject({
       name: "AuthClientError",
-      code: "token_refresh_failed",
-      retryable: true,
-      message: "Token refresh failed: network error",
+      code: "token_refresh_outcome_unknown",
+      retryable: false,
+      message: "Token refresh outcome is unknown: network error",
     } satisfies Partial<AuthClientError>);
-    expect(tokenStore().getAccessToken()).toBe("AT");
-    expect(tokenStore().getRefreshToken()).toBe("RT");
-    expect(getState().status).toBe("authenticated");
+    expect(tokenStore().getAccessToken()).toBeNull();
+    expect(tokenStore().getRefreshToken()).toBeNull();
+    expect(getState().status).toBe("unauthenticated");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("响应丢失后即使后续预设成功也不发送第二次旧票据", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("response lost"))
+      .mockResolvedValueOnce(rotatedResponse("AT-successor", "RT-successor"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(refresh()).rejects.toMatchObject({
+      code: "token_refresh_outcome_unknown",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(tokenStore().getRefreshToken()).toBeNull();
+    expect(getState().status).toBe("unauthenticated");
+  });
+
+  it("网关 5xx 后即使后续预设成功也不重放旧票据", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+      .mockResolvedValueOnce(rotatedResponse("AT-successor", "RT-successor"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(refresh()).rejects.toMatchObject({
+      code: "token_refresh_outcome_unknown",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(tokenStore().getRefreshToken()).toBeNull();
   });
 });
 
@@ -469,7 +502,7 @@ describe("refresh(): token 响应运行时校验", () => {
     ["空 refresh_token", { access_token: "AT2", refresh_token: "   ", expires_in: 900 }],
     ["字符串 expires_in", { access_token: "AT2", refresh_token: "RT2", expires_in: "900" }],
     ["非正 expires_in", { access_token: "AT2", refresh_token: "RT2", expires_in: 0 }],
-  ])("拒绝%s且不覆盖旧 token", async (_label, payload) => {
+  ])("拒绝%s响应并立即隔离旧 token", async (_label, payload) => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
@@ -482,29 +515,44 @@ describe("refresh(): token 响应运行时校验", () => {
 
     await expect(refresh()).rejects.toMatchObject({
       name: "AuthClientError",
-      code: "token_refresh_invalid_response",
-      retryable: true,
+      code: "token_refresh_outcome_unknown",
+      retryable: false,
     } satisfies Partial<AuthClientError>);
-    expect(tokenStore().getAccessToken()).toBe("AT-old");
-    expect(tokenStore().getRefreshToken()).toBe("RT-old");
-    expect(getState()).toEqual({ user: { id: "u1" }, status: "authenticated" });
+    expect(tokenStore().getAccessToken()).toBeNull();
+    expect(tokenStore().getRefreshToken()).toBeNull();
+    expect(getState()).toEqual({ user: null, status: "unauthenticated" });
   });
 
-  it("拒绝异常 JSON 且不覆盖旧 token", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response("not-json", { status: 200, headers: { "content-type": "application/json" } }),
-      ),
+  it("单次异常 JSON 后隔离旧 token", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response("not-json", { status: 200, headers: { "content-type": "application/json" } })
     );
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(refresh()).rejects.toMatchObject({
       name: "AuthClientError",
-      code: "token_refresh_invalid_response",
-      retryable: true,
+      code: "token_refresh_outcome_unknown",
+      retryable: false,
     } satisfies Partial<AuthClientError>);
-    expect(tokenStore().getAccessToken()).toBe("AT-old");
-    expect(tokenStore().getRefreshToken()).toBe("RT-old");
+    expect(tokenStore().getAccessToken()).toBeNull();
+    expect(tokenStore().getRefreshToken()).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("无效成功响应后即使后续预设成功也不重放旧票据", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("not-json", { status: 200, headers: { "content-type": "application/json" } }),
+      )
+      .mockResolvedValueOnce(rotatedResponse("AT-successor", "RT-successor"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(refresh()).rejects.toMatchObject({
+      code: "token_refresh_outcome_unknown",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(tokenStore().getRefreshToken()).toBeNull();
   });
 });
 
